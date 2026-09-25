@@ -71,3 +71,16 @@ Live sequence retrieval requires outbound HTTPS access to ZFIN, NCBI, and Ensemb
 ## Next research step
 
 For laboratory-grade prediction, replace the analytical plate basis with a finite-element eigenproblem using exact plate shape, thickness map, mounting and actuator location. Then use a measured frequency sweep and camera-based modal identification to estimate the real resonator transfer function and solve the inverse waveform problem.
+
+## Important projection / cymatics distinction
+
+A long DNA molecule viewed literally from the side is expected to look line-like. The previous implementation also accumulated local roll/tilt/slide/shift into the global molecular frame, which exaggerated that effect and produced an artificial bend. The current implementation keeps the B-DNA axis approximately straight along Z while applying those values locally.
+
+The application now shows two separate 2D products:
+
+1. **Geometric 2D projection** — a literal projection of the reconstructed 3D coarse-grained molecule. A long B-DNA sequence viewed from the side is line-like; viewed from the helical axis it is approximately an annulus.
+2. **DNA-derived cymatic target** — a radial standing-wave field created from sequence information plus local helical-step information. This is intentionally snowflake/Chladni-like and is the image passed to the inverse frequency solver.
+
+The second image is the mathematically explicit bridge to cymatics. It should not be described as an intrinsic 2D photograph of DNA.
+
+The default inverse model is now an **ideal circular membrane eigenmode search** using Bessel-function modes. A real metal plate requires calibration/FEM because its modes depend on boundary conditions, thickness, material, damping, and actuator coupling.

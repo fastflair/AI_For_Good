@@ -13,6 +13,8 @@ from dna_cymatics import (  # noqa: E402
     build_dna_structure,
     clean_sequence,
     density_projection,
+    dna_cymatic_target,
+    rank_circular_membrane_modes,
     fft_components,
     rank_square_plate_modes,
     map_components,
@@ -133,9 +135,20 @@ def test_geometry_and_projection():
     dna = build_dna_structure(SEQ)
     assert dna.centers.shape == (len(SEQ), 3)
     assert dna.strand1.shape == dna.strand2.shape == dna.centers.shape
-    proj = density_projection(dna, size=256)
+    # Sequence-dependent local twist/roll must not accumulate into a kilometer-scale
+    # artificial bend. The helix axis remains approximately straight along Z.
+    span = np.ptp(dna.centers, axis=0)
+    assert span[2] > 100.0 * max(span[0], span[1], 1e-9)
+    proj = density_projection(dna, projection="XY (top)", size=256)
     assert proj.image.shape == (256, 256)
     assert 0.0 <= proj.image.min() <= proj.image.max() <= 1.0
+    target = dna_cymatic_target(dna, size=256)
+    assert target.shape == (256, 256)
+    assert 0.0 <= target.min() <= target.max() <= 1.0
+    assert target[0, 0] < 1e-6
+    modes, recon = rank_circular_membrane_modes(target, 0.15, 120, max_m=8, radial_orders=3, top_modes=6)
+    assert len(modes) == 6
+    assert recon.shape == (160, 160)
 
 
 def test_fft_and_mapping():

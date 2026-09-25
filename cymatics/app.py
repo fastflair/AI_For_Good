@@ -19,11 +19,13 @@ from dna_cymatics import (
     clean_sequence,
     create_mapped_audio,
     density_projection,
+    dna_cymatic_target,
     dna_summary,
     fft_components,
     image_metrics,
     map_components,
     rank_square_plate_modes,
+    rank_circular_membrane_modes,
     reconstruct_from_components,
     hz_to_note,
     quantize_frequency,
@@ -42,24 +44,53 @@ OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
 
 
 def _plotly_3d(dna):
+    """Interactive 3D DNA view with automatic transverse magnification.
+
+    A 1,507-bp DNA molecule is physically hundreds of times longer than its
+    ~2-nm diameter. Plotting literal Å coordinates with equal physical aspect
+    ratio makes a correct double helix visually collapse into a line. We
+    therefore magnify X/Y for display only and state the scale in the title.
+    """
+    z_span = max(float(np.ptp(dna.centers[:, 2])), 1e-9)
+    xy_span = max(float(np.ptp(np.vstack([dna.strand1, dna.strand2])[:, :2], axis=0).max()), 1e-9)
+    xy_scale = float(np.clip(0.18 * z_span / xy_span, 1.0, 80.0))
+
+    def tx(points):
+        q = np.asarray(points, dtype=float).copy()
+        q[:, 0] *= xy_scale
+        q[:, 1] *= xy_scale
+        return q
+
+    s1 = tx(dna.strand1)
+    s2 = tx(dna.strand2)
     fig = go.Figure()
     fig.add_trace(go.Scatter3d(
-        x=dna.strand1[:, 0], y=dna.strand1[:, 1], z=dna.strand1[:, 2],
-        mode="lines+markers", name="Strand 1", marker=dict(size=3), line=dict(width=6)
+        x=s1[:, 0], y=s1[:, 1], z=s1[:, 2],
+        mode="lines", name="Strand 1", line=dict(width=7)
     ))
     fig.add_trace(go.Scatter3d(
-        x=dna.strand2[:, 0], y=dna.strand2[:, 1], z=dna.strand2[:, 2],
-        mode="lines+markers", name="Strand 2", marker=dict(size=3), line=dict(width=6)
+        x=s2[:, 0], y=s2[:, 1], z=s2[:, 2],
+        mode="lines", name="Strand 2", line=dict(width=7)
     ))
-    for i, edge in enumerate(dna.basepair_edges):
+    edges = tx(dna.basepair_edges.reshape(-1, 3)).reshape(dna.basepair_edges.shape)
+    # Plot every Nth base-pair connector so a 1,500-bp sequence remains
+    # interactive without thousands of individual Plotly traces.
+    stride = max(1, len(edges) // 180)
+    for i in range(0, len(edges), stride):
+        edge = edges[i]
         fig.add_trace(go.Scatter3d(
             x=edge[:, 0], y=edge[:, 1], z=edge[:, 2], mode="lines",
-            showlegend=False, line=dict(width=2), hovertext=[f"bp {i+1}", f"bp {i+1}"],
+            showlegend=False, line=dict(width=2),
         ))
     fig.update_layout(
-        title="Sequence-dependent coarse-grained dsDNA",
-        scene=dict(xaxis_title="X (Å)", yaxis_title="Y (Å)", zaxis_title="Z (Å)", aspectmode="data"),
-        margin=dict(l=0, r=0, t=40, b=0), height=620,
+        title=f"Coarse-grained dsDNA — transverse display magnification ×{xy_scale:.1f}",
+        scene=dict(
+            xaxis_title="X (Å) × display scale",
+            yaxis_title="Y (Å) × display scale",
+            zaxis_title="Z (Å)",
+            aspectmode="auto",
+        ),
+        margin=dict(l=0, r=0, t=55, b=0), height=620,
     )
     return fig
 
@@ -188,24 +219,24 @@ def run_pipeline(
         seq = clean_sequence(sequence)
         dna = build_dna_structure(seq, model=dna_model)
         proj = density_projection(dna, projection=projection, size=int(projection_size), blur_px=float(blur_px))
+        cymatic_target = dna_cymatic_target(dna, size=int(projection_size))
 
+        # Frequency analysis operates on the explicit cymatic target, not the
+        # literal geometric projection. The latter is retained for inspection.
         canvas_width_m = float(canvas_width_mm) / 1000.0
-        comps, spectrum = fft_components(proj.image, canvas_width_m, top_n=int(top_components))
+        comps, spectrum = fft_components(cymatic_target, canvas_width_m, top_n=int(top_components))
         E, rho, nu = PLATE_MATERIALS[plate_material]
 
         mode_note = ""
-        if mapping_mode == "Square plate mode search":
-            mode_df, recon = rank_square_plate_modes(
-                proj.image,
-                width_m=canvas_width_m,
-                height_m=canvas_width_m,
-                thickness_m=float(thickness_mm) / 1000.0,
-                young_pa=E,
-                density_kg_m3=rho,
-                poisson=nu,
-                max_mode=12,
+        if mapping_mode == "Circular membrane mode search":
+            mode_df, recon = rank_circular_membrane_modes(
+                cymatic_target,
+                radius_m=canvas_width_m / 2.0,
+                wave_speed_m_s=float(membrane_speed),
+                max_m=12,
+                radial_orders=5,
                 top_modes=int(top_components),
-                target_type=pattern_target,
+                target_type="Nodal / sand",
             )
             freq_df = pd.DataFrame({
                 "component": mode_df["mode_rank"],
@@ -228,8 +259,9 @@ def run_pipeline(
                 freq_df["note_Hz"] = q
                 freq_df["note"] = [hz_to_note(float(f)) for f in q]
             mode_note = (
-                "The mode table ranks individual simply-supported analytical modes by spatial similarity. "
-                "Different non-degenerate frequencies do not produce one static Chladni figure simultaneously."
+                "The target is a DNA-derived radial standing-wave field. The mode table ranks ideal circular-membrane "
+                "eigenmodes by spatial similarity. A real plate will differ until its boundary conditions, material, "
+                "damping and actuator coupling are experimentally calibrated."
             )
             from scipy.ndimage import zoom
             recon = zoom(recon, (proj.image.shape[0] / recon.shape[0], proj.image.shape[1] / recon.shape[1]), order=1)
@@ -248,10 +280,10 @@ def run_pipeline(
                 frequency_multiplier=float(frequency_multiplier),
                 quantization=quantization,
             )
-            recon = reconstruct_from_components(proj.image, comps)
+            recon = reconstruct_from_components(cymatic_target, comps)
             mode_note = (
-                "The FFT mapping is a reproducible sonification of spatial structure. It is not a unique physical "
-                "inverse of a real plate."
+                "The FFT mapping is a reproducible sonification of the DNA-derived cymatic target. It is not a unique "
+                "physical inverse of a real plate or membrane."
             )
 
         audio, note_sequence = create_mapped_audio(
@@ -272,9 +304,11 @@ def run_pipeline(
         sf.write(wav_path, audio, 44_100, subtype="PCM_16")
         freq_df.to_csv(csv_path, index=False)
 
+        target_png = run_dir / "dna_cymatic_target.png"
         figures = [
-            (p_png, proj.image, f"DNA 2D projection — {projection}", "magma"),
-            (s_png, spectrum, "Log spatial spectrum", "viridis"),
+            (p_png, proj.image, f"Geometric 2D projection — {projection}", "magma"),
+            (target_png, cymatic_target, "DNA-derived cymatic target", "magma"),
+            (s_png, spectrum, "Log spatial spectrum of cymatic target", "viridis"),
             (r_png, recon, "Model reconstruction / modal mixture", "magma"),
         ]
         for path, arr, title, cmap in figures:
@@ -288,6 +322,7 @@ def run_pipeline(
             "settings": {
                 "dna_model": dna_model, "projection": projection,
                 "projection_size": int(projection_size), "blur_px": float(blur_px),
+                "cymatic_target": "DNA-driven circular standing-wave target",
                 "top_components": int(top_components), "canvas_width_mm": float(canvas_width_mm),
                 "mapping_mode": mapping_mode, "pattern_target": pattern_target,
                 "plate_material": plate_material, "thickness_mm": float(thickness_mm),
@@ -299,21 +334,22 @@ def run_pipeline(
         }
         json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         with zipfile.ZipFile(bundle_path, "w", zipfile.ZIP_DEFLATED) as z:
-            for p in [wav_path, csv_path, p_png, s_png, r_png, json_path]:
+            for p in [wav_path, csv_path, p_png, target_png, s_png, r_png, json_path]:
                 z.write(p, p.name)
 
         text = (
             f"**{len(seq):,} bp** · GC **{summary['GC_percent']:.1f}%** · "
             f"estimated turns **{summary['estimated_turns']:.2f}**\n\n{mode_note}\n\n"
-            f"Generated **{len(freq_df)}** frequency/mode entries and a **{float(duration_s):.1f} s** WAV."
+            f"Generated **{len(freq_df)}** frequency/mode entries from the DNA-derived cymatic target and a **{float(duration_s):.1f} s** WAV."
         )
         return (
             _plotly_3d(dna),
-            _image_plot(proj.image, f"DNA 2D projection — {projection}", cmap="magma", xlabel=proj.x_label, ylabel=proj.y_label),
-            _image_plot(spectrum, "Log spatial spectrum", cmap="viridis"),
+            _image_plot(proj.image, f"Geometric 2D projection — {projection}", cmap="magma", xlabel=proj.x_label, ylabel=proj.y_label),
+            _image_plot(cymatic_target, "DNA-derived cymatic target", cmap="magma"),
+            _image_plot(spectrum, "Log spatial spectrum of cymatic target", cmap="viridis"),
             _image_plot(recon, "Model reconstruction / modal mixture", cmap="magma"),
             freq_df, text, str(wav_path), str(bundle_path),
-            proj.image,
+            cymatic_target,
         )
     except Exception as exc:
         raise gr.Error(str(exc)) from exc
@@ -385,15 +421,15 @@ The initial canonical sequence is **hoxb1a-201**, the 1,507-nt zebrafish mature 
                     info="Default: hoxb1a-201 mature mRNA/cDNA (1,507 nt). Genomic DNA and CDS can be loaded from the retrieval tab.",
                 )
                 dna_model = gr.Radio(["sequence-dependent", "canonical"], value="sequence-dependent", label="DNA geometry model")
-                projection = gr.Dropdown(["XZ (side)", "XY (top)", "YZ (side)", "PCA"], value="XZ (side)", label="2D projection")
+                projection = gr.Dropdown(["XY (top)", "XZ (side)", "YZ (side)", "PCA"], value="XY (top)", label="Geometric 2D projection")
                 projection_size = gr.Slider(128, 1024, value=512, step=64, label="Projection resolution")
                 blur_px = gr.Slider(0.0, 6.0, value=1.4, step=0.1, label="2D rendering blur (pixels)")
                 top_components = gr.Slider(4, 48, value=16, step=1, label="Frequency / mode count")
             with gr.Column(scale=1):
                 canvas_width_mm = gr.Slider(50, 1000, value=300, step=10, label="Physical plate width (mm)")
                 mapping_mode = gr.Radio(
-                    ["Thin plate", "Membrane", "Musical radial", "Square plate mode search"],
-                    value="Square plate mode search", label="Frequency model"
+                    ["Thin plate", "Membrane", "Musical radial", "Circular membrane mode search", "Square plate mode search"],
+                    value="Circular membrane mode search", label="Frequency model"
                 )
                 pattern_target = gr.Radio(["DNA density", "Nodal / sand"], value="Nodal / sand", label="Target interpretation")
                 plate_material = gr.Dropdown(list(PLATE_MATERIALS.keys()), value="Steel", label="Plate material")
@@ -412,9 +448,11 @@ The initial canonical sequence is **hoxb1a-201**, the 1,507-nt zebrafish mature 
         gr.Markdown("## Results")
         with gr.Row():
             out_3d = gr.Plot(label="3D reconstruction")
-            out_projection = gr.Plot(label="2D projection")
+            out_projection = gr.Plot(label="Geometric 2D projection")
         with gr.Row():
+            out_cymatic = gr.Plot(label="DNA-derived cymatic target")
             out_spectrum = gr.Plot(label="Spatial spectrum")
+        with gr.Row():
             out_recon = gr.Plot(label="Pattern reconstruction")
         out_table = gr.Dataframe(label="Derived frequencies / plate modes", wrap=True)
         out_summary = gr.Markdown()
@@ -422,6 +460,11 @@ The initial canonical sequence is **hoxb1a-201**, the 1,507-nt zebrafish mature 
             out_audio = gr.Audio(label="Generated WAV", type="filepath")
             out_bundle = gr.File(label="Analysis bundle")
         reference_state = gr.State(None)
+        gr.Markdown(
+            "**Important:** the geometric projection and the cymatic target are intentionally separate. "
+            "A long DNA molecule viewed from the side is line-like, while a circular resonator produces radial standing-wave patterns. "
+            "The cymatic target is the explicit mathematical bridge used for frequency inversion."
+        )
 
         run.click(
             fn=run_pipeline,
@@ -429,7 +472,7 @@ The initial canonical sequence is **hoxb1a-201**, the 1,507-nt zebrafish mature 
                     canvas_width_mm, mapping_mode, pattern_target, plate_material, thickness_mm,
                     membrane_speed, musical_base, musical_octaves, frequency_multiplier,
                     quantization, audio_style, duration_s, tempo_bpm, beats_per_note],
-            outputs=[out_3d, out_projection, out_spectrum, out_recon, out_table, out_summary, out_audio, out_bundle, reference_state],
+            outputs=[out_3d, out_projection, out_cymatic, out_spectrum, out_recon, out_table, out_summary, out_audio, out_bundle, reference_state],
         )
 
     with gr.Tab("Experimental Cymatics Verification"):

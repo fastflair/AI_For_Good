@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 from scipy.ndimage import gaussian_filter, zoom
 from scipy.optimize import nnls
+from scipy.special import jv, jn_zeros
 
 
 # The 10 unique DNA dinucleotide steps are sufficient because of reverse-complement
@@ -125,12 +126,19 @@ def build_dna_structure(
     model: str = "sequence-dependent",
     backbone_radius_A: float = 10.0,
 ) -> DNA3D:
-    """Build a sequence-dependent coarse-grained dsDNA reconstruction.
+    """Build a visually/structurally coherent coarse-grained dsDNA model.
 
-    This is a rigid-base-pair-step reconstruction, not an atomistic molecular
-    dynamics simulation. It captures sequence-dependent local twist, roll,
-    tilt, shift, slide and rise and then places two coarse backbone loci around
-    each local base-pair frame.
+    The previous implementation propagated roll/tilt as cumulative frame
+    rotations and also accumulated slide/shift into the centerline. Over a
+    1,500-bp transcript that produces an artificial macroscopic bend and can
+    make the entire molecule look like a line in every projection.
+
+    This implementation preserves the B-DNA helical axis along +Z while still
+    using sequence-dependent twist, roll, tilt, slide and shift as *local*
+    base-pair-step properties. The centerline uses the cumulative rise and the
+    local shift/slide perturbation is applied without integrating it as a
+    persistent bend. It is intentionally a coarse-grained visualization, not
+    an atomistic structure or MD trajectory.
     """
     seq = clean_sequence(sequence)
     if model not in {"sequence-dependent", "canonical"}:
@@ -143,7 +151,16 @@ def build_dna_structure(
     frames = np.zeros((n, 3, 3), dtype=float)
     frames[0] = np.eye(3)
 
+    theta = 0.0
+    z = 0.0
     step_rows: List[dict] = []
+
+    # Local perturbations are intentionally bounded. The experimental base-pair
+    # step values describe local geometry; summing slide/shift over 1500 bp as a
+    # random walk would not be an appropriate visualization of a stable B-DNA
+    # axis for this application.
+    local_center_scale = 0.35
+
     for i in range(n - 1):
         step = seq[i : i + 2]
         if model == "canonical":
@@ -151,32 +168,35 @@ def build_dna_structure(
         else:
             p = STEP_PARAMS[step]
 
-        local_R = (
-            _rz(math.radians(p["twist"]))
-            @ _ry(math.radians(p["roll"]))
-            @ _rx(math.radians(p["tilt"]))
-        )
-        local_t = np.array([p["shift"], p["slide"], p["rise"]], dtype=float)
+        theta += math.radians(p["twist"])
+        z += float(p["rise"])
 
-        # Matrix convention: frame[i] maps local coordinates into global.
-        frames[i + 1] = frames[i] @ local_R
-        centers[i + 1] = centers[i] + frames[i] @ local_t
+        # Keep the global helical axis straight. Apply slide/shift as a small
+        # local displacement in the current base-pair plane rather than a
+        # cumulative translation of the molecular axis.
+        Rz = _rz(theta)
+        local_offset = local_center_scale * np.array([p["shift"], p["slide"], 0.0], dtype=float)
+        centers[i + 1] = np.array([0.0, 0.0, z]) + Rz @ local_offset
+
+        # Local roll/tilt alter the base-pair frame but do not create an
+        # artificial many-kilobase global bend.
+        frames[i + 1] = Rz @ _ry(math.radians(p["roll"])) @ _rx(math.radians(p["tilt"]))
         step_rows.append({"index": i + 1, "step": step, **p})
 
     strand1 = np.zeros_like(centers)
     strand2 = np.zeros_like(centers)
     basepair_edges = np.zeros((n, 2, 3), dtype=float)
 
-    # The simple backbone radius is intentionally a visualization scale rather
-    # than an atomically reconstructed phosphate/sugar backbone.
+    # Phase offset approximates the two backbone loci relative to the base-pair
+    # local x-axis. The exact atomic backbone is outside the scope of this model.
     phase = math.radians(12.0)
-    a = backbone_radius_A * np.array([math.cos(phase), math.sin(phase), 0.0])
-    b = backbone_radius_A * np.array([math.cos(phase + math.pi), math.sin(phase + math.pi), 0.0])
+    radial = backbone_radius_A * np.array([math.cos(phase), math.sin(phase), 0.0])
+    anti = -radial
     for i in range(n):
-        strand1[i] = centers[i] + frames[i] @ a
-        strand2[i] = centers[i] + frames[i] @ b
-        basepair_edges[i, 0] = centers[i] + frames[i] @ (0.92 * a)
-        basepair_edges[i, 1] = centers[i] + frames[i] @ (0.92 * b)
+        strand1[i] = centers[i] + frames[i] @ radial
+        strand2[i] = centers[i] + frames[i] @ anti
+        basepair_edges[i, 0] = centers[i] + frames[i] @ (0.92 * radial)
+        basepair_edges[i, 1] = centers[i] + frames[i] @ (0.92 * anti)
 
     step_df = pd.DataFrame(step_rows)
     return DNA3D(seq, centers, strand1, strand2, basepair_edges, frames, step_df)
@@ -233,6 +253,131 @@ def density_projection(
     if peak > 0:
         image /= peak
     return Projection2D(image=image, xy=xy, x_label=xlabel, y_label=ylabel, width_A=side, height_A=side)
+
+
+def dna_cymatic_target(
+    dna: DNA3D,
+    size: int = 512,
+    max_angular_mode: int = 12,
+    radial_modes: int = 3,
+    nodal_width: float = 0.17,
+    radial_bias: float = 0.55,
+) -> np.ndarray:
+    """Create a radial, snowflake-like DNA-derived cymatic target field.
+
+    This is deliberately separated from the geometric projection. A literal
+    top-down projection of a long B-DNA molecule is approximately cylindrical
+    (an annulus), whereas a Chladni/cymatics image is a resonant wavefield. This
+    transform converts sequence order + helical phase into angular Fourier
+    content, then expands that content in circular standing-wave basis
+    functions. The result is an explicit *cymatic target*, suitable for inverse
+    mode fitting, rather than claiming that a raw projection is itself a
+    Chladni pattern.
+
+    The target is therefore an engineered mathematical bridge between the DNA
+    geometry and a circular resonator. It is not a claim that DNA intrinsically
+    generates these frequencies in nature.
+    """
+    size = int(size)
+    if not 64 <= size <= 2048:
+        raise ValueError("Target size must be between 64 and 2048 pixels.")
+    if radial_modes < 1 or max_angular_mode < 2:
+        raise ValueError("Need at least two angular modes and one radial mode.")
+
+    seq = dna.sequence
+    n = len(seq)
+    # Use several orthogonal scalar encodings so A/T/G/C do not collapse into a
+    # single overly-symmetric signal.
+    code = {
+        "A": np.array([1.0, 1.0, 0.0]),
+        "T": np.array([-1.0, 1.0, 0.0]),
+        "G": np.array([0.0, -1.0, 1.0]),
+        "C": np.array([0.0, -1.0, -1.0]),
+    }
+    encoded = np.asarray([code[b] for b in seq], dtype=float)
+
+    # Local structural terms keep the 3D geometry tied to the 2D target.
+    twist = np.zeros(n, dtype=float)
+    roll = np.zeros(n, dtype=float)
+    slide = np.zeros(n, dtype=float)
+    if n > 1 and not dna.step_df.empty:
+        twist[1:] = dna.step_df["twist"].to_numpy(dtype=float)
+        roll[1:] = dna.step_df["roll"].to_numpy(dtype=float)
+        slide[1:] = dna.step_df["slide"].to_numpy(dtype=float)
+    twist_phase = np.cumsum(np.deg2rad(twist))
+    seq_angle = np.linspace(0.0, 2.0 * math.pi, n, endpoint=False)
+
+    # Base-specific scalar channels plus local helical phase/step geometry.
+    signals = np.column_stack([
+        encoded[:, 0],
+        encoded[:, 1],
+        encoded[:, 2],
+        0.08 * np.sin(twist_phase),
+        0.04 * roll,
+        0.04 * slide,
+    ])
+    # Robustly normalize each channel, then fuse into one sequence signal.
+    signal = np.zeros(n, dtype=float)
+    channel_weights = np.array([1.0, 0.8, 0.75, 0.6, 0.4, 0.4])
+    for j, w in enumerate(channel_weights):
+        ch = signals[:, j]
+        ch = ch - np.mean(ch)
+        scale = np.std(ch)
+        if scale > 1e-12:
+            signal += w * ch / scale
+    signal -= signal.mean()
+
+    # Resample onto a periodic angular grid while preserving gene order. This
+    # makes the angular spectrum reproducible for any sequence length.
+    angles = np.linspace(0.0, 2.0 * math.pi, 720, endpoint=False)
+    src = np.linspace(0.0, 2.0 * math.pi, n, endpoint=False)
+    periodic = np.interp(
+        angles,
+        np.r_[src, 2.0 * math.pi],
+        np.r_[signal, signal[0]],
+        period=2.0 * math.pi,
+    )
+    periodic = gaussian_filter(periodic, sigma=1.25, mode="wrap")
+    spectrum = np.fft.rfft(periodic)
+
+    # Select low angular harmonics that contain actual sequence information.
+    candidates = [(m, abs(spectrum[m])) for m in range(2, min(max_angular_mode, len(spectrum) - 1) + 1)]
+    candidates.sort(key=lambda item: item[1], reverse=True)
+    selected = candidates[: min(7, len(candidates))]
+    if not selected:
+        selected = [(2, 1.0)]
+    max_amp = max(a for _, a in selected) or 1.0
+
+    yy, xx = np.mgrid[-1.0:1.0:complex(size), -1.0:1.0:complex(size)]
+    r = np.hypot(xx, yy)
+    theta = np.arctan2(yy, xx)
+    field = np.zeros_like(r, dtype=float)
+
+    for m, amp in selected:
+        norm_amp = float(amp / max_amp)
+        phase = float(np.angle(spectrum[m]))
+        # Mix the first few circular membrane radial orders. The Bessel basis is
+        # the natural separation-of-variables basis for a circular membrane.
+        for radial_order in range(1, int(radial_modes) + 1):
+            alpha = float(jn_zeros(m, radial_order)[-1])
+            radial = jv(m, alpha * r)
+            taper = np.exp(-((r - radial_bias) / 0.52) ** 2) + 0.35 * np.exp(-((r - 0.20) / 0.18) ** 2)
+            radial *= taper
+            w = norm_amp / radial_order
+            field += w * radial * np.cos(m * theta + phase + 0.45 * radial_order)
+
+    # Convert standing-wave displacement into a soft nodal/sand target. The
+    # exponential keeps fine nodal contours visible without binary aliasing.
+    sigma = max(float(nodal_width), 0.01)
+    target = np.exp(-((np.abs(field) / sigma) ** 2))
+    # Soft circular aperture matching a finite resonator.
+    aperture = np.clip((1.0 - r) / 0.035, 0.0, 1.0)
+    target *= aperture
+    target -= target.min()
+    peak = target.max()
+    if peak > 0:
+        target /= peak
+    return target
 
 
 def fft_components(
@@ -412,6 +557,77 @@ def map_components(
             }
         )
     return pd.DataFrame(rows)
+
+
+def circular_membrane_mode_frequency(m: int, n: int, radius_m: float, wave_speed_m_s: float) -> float:
+    """Ideal circular-membrane Dirichlet eigenfrequency in Hz."""
+    if m < 0 or n < 1 or radius_m <= 0 or wave_speed_m_s <= 0:
+        return 0.0
+    zero = float(jn_zeros(int(m), int(n))[-1])
+    return float(wave_speed_m_s * zero / (2.0 * math.pi * radius_m))
+
+
+def rank_circular_membrane_modes(
+    target_image: np.ndarray,
+    radius_m: float,
+    wave_speed_m_s: float,
+    max_m: int = 12,
+    radial_orders: int = 4,
+    top_modes: int = 12,
+    target_type: str = "Nodal / sand",
+    fit_size: int = 160,
+    nodal_sigma: float = 0.16,
+) -> Tuple[pd.DataFrame, np.ndarray]:
+    """Rank circular membrane modes by similarity to a radial DNA cymatic target."""
+    if target_type not in {"DNA density", "Nodal / sand"}:
+        raise ValueError("Unknown target_type")
+    target = _resize_square(np.asarray(target_image, dtype=float), fit_size)
+    y = np.linspace(-radius_m, radius_m, fit_size)
+    x = np.linspace(-radius_m, radius_m, fit_size)
+    X, Y = np.meshgrid(x, y)
+    R = np.hypot(X, Y)
+    TH = np.arctan2(Y, X)
+
+    candidates = []
+    for m in range(0, int(max_m) + 1):
+        for n in range(1, int(radial_orders) + 1):
+            alpha = float(jn_zeros(m, n)[-1])
+            rho = R / max(radius_m, 1e-12)
+            phi = jv(m, alpha * rho) * np.cos(m * TH)
+            phi[R > radius_m] = 0.0
+            if target_type == "Nodal / sand":
+                field = np.exp(-((np.abs(phi) / max(float(nodal_sigma), 1e-4)) ** 2))
+            else:
+                field = (phi - phi.min()) / max(phi.max() - phi.min(), 1e-12)
+            score = _corr(target, field)
+            freq = circular_membrane_mode_frequency(m, n, radius_m, wave_speed_m_s)
+            candidates.append((score, m, n, freq, field))
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    selected = candidates[: int(top_modes)]
+    positive = np.asarray([max(0.0, c[0]) for c in selected], dtype=float)
+    weights = positive / positive.sum() if positive.sum() > 0 else np.ones(len(selected)) / max(len(selected), 1)
+
+    recon = np.zeros_like(target)
+    rows = []
+    for rank, (weight, candidate) in enumerate(zip(weights, selected), start=1):
+        score, m, n, freq, field = candidate
+        recon += weight * field
+        rows.append({
+            "mode_rank": rank,
+            "m": m,
+            "n": n,
+            "frequency_Hz": float(freq),
+            "note": hz_to_note(freq),
+            "pattern_correlation": float(score),
+            "mixture_weight": float(weight),
+            "resonator": "ideal circular membrane",
+        })
+    recon -= recon.min()
+    peak = recon.max()
+    if peak > 0:
+        recon /= peak
+    return pd.DataFrame(rows), recon
 
 
 def square_plate_mode_frequency(
