@@ -1,0 +1,67 @@
+DNA CYMATICS — OPTIONAL 3DNA INSTALLATION
+==========================================
+
+3DNA is the preferred external tool for higher-fidelity sequence-only nucleic-acid
+coordinate generation in this application.
+
+Relevant capabilities
+---------------------
+
+fiber
+-----
+Idealized A-DNA, B-DNA, C-DNA, Z-DNA and RNA fiber construction.
+
+rebuild -atomic
+---------------
+Atomic-coordinate reconstruction from local base-pair-step parameters.
+
+cp_std
+------
+Standard template support used by 3DNA rebuilding workflows.
+
+Environment discovery
+---------------------
+The application searches for tools using:
+
+1. An explicit path entered in the UI.
+2. The X3DNA environment variable.
+3. PATH.
+
+Linux/macOS example:
+
+  export X3DNA=/path/to/x3dna
+  export PATH="$X3DNA/bin:$PATH"
+
+Windows PowerShell example:
+
+  $env:X3DNA = "C:\x3dna-v2.4"
+  $env:Path = "C:\x3dna-v2.4\bin;" + $env:Path
+
+The UI also accepts an explicit executable or installation directory.
+
+Accuracy notes
+--------------
+
+The application distinguishes:
+
+  3DNA sequence-dependent atomic rebuild
+  3DNA idealized fiber
+  fallback parametric atom-site surrogate
+
+The fallback is for visualization and testing only.
+
+Sequence-dependent atomic rebuild is currently standardized to B-DNA. For A/C/Z
+or RNA conformational reference models, use the 3DNA fiber path or supply an
+appropriate external structure.
+
+References
+----------
+
+3DNA:
+https://x3dna.org/
+
+3DNA rebuilding protocol:
+https://pmc.ncbi.nlm.nih.gov/articles/PMC3667640/
+
+3DNA documentation:
+https://docs.x3dna.org/

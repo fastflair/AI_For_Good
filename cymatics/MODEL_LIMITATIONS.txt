@@ -1,0 +1,90 @@
+DNA CYMATICS — MODEL LIMITATIONS
+================================
+
+This file lists limitations that must be retained with experimental results.
+
+1. Sequence-only DNA reconstruction
+-----------------------------------
+The built-in sequence-dependent reconstruction uses representative dinucleotide
+step parameters. It is a geometric model, not molecular dynamics and not an
+experimental structure determination.
+
+2. 3DNA models
+--------------
+3DNA provides idealized fibers and atomic rebuilding tools. These are models and
+should not be interpreted as the unique physical conformation of an entire gene.
+A/B/C/Z form selection is a structural assumption/reference, not evidence that a
+particular in-vivo locus has one global conformation.
+
+3. RNA versus DNA
+-----------------
+The canonical hoxb1a-201 input is mature mRNA/cDNA. Modeling it as a DNA duplex is
+an explicit computational choice. RNA and DNA differ structurally and should not
+be silently conflated.
+
+4. Long-locus projection
+------------------------
+A literal projection down the molecular axis and a side projection of a long DNA
+sequence are expected to differ dramatically. A side view of a gene-length duplex
+is visually line-like because the axial extent is hundreds of nanometers while the
+diameter is roughly two nanometers.
+
+5. One-turn target
+------------------
+The single-turn view uses only atoms in one axial pitch window. It is useful for
+cross-sectional pattern analysis but is not a projection of every atom in the
+gene.
+
+6. Phase-folded target
+----------------------
+Phase folding uses a mathematical coordinate transform to register successive
+helical turns. It is not a literal camera image. It is useful for repeat-geometry
+analysis but must be labeled as derived.
+
+7. Atom-density weighting
+-------------------------
+Uniform occupancy and atomic-mass weighting are alternative visualization models.
+Neither is automatically equivalent to a camera intensity, electron-density map,
+or mechanical force distribution.
+
+8. Cymatics frequency mapping
+-----------------------------
+There is no universal DNA-to-Chladni frequency map in this application. Frequencies
+come from the selected resonator model. A frequency has physical meaning only in
+combination with the resonator geometry, material, thickness/stress, mounting and
+actuator coupling.
+
+9. Circular membrane assumption
+-------------------------------
+The Bessel-function mode solver is for an idealized circular membrane. A real metal
+plate is generally a flexural plate with bending stiffness and practical boundary
+conditions. Experimental resonances can differ from simple analytical modes.
+
+10. Mode mixtures
+-----------------
+A visual mixture of several different resonant modes is an analytical visualization,
+not one static physical Chladni pattern. Different frequencies generally produce
+different time-dependent responses. Degenerate or nearly degenerate modes can mix,
+which is why a calibrated resonator is preferable.
+
+11. Musical WAV
+---------------
+The musical WAV is a sonification. Musical pitch quantization, harmony and added
+harmonics are not guaranteed to preserve a physical cymatics pattern.
+
+12. Experimental verification
+-----------------------------
+Image correlation does not establish causation, uniqueness or an intrinsic DNA
+frequency. Controls, independent resonance measurement, repeated trials and full
+metadata are required.
+
+13. Uploaded structures
+-----------------------
+PDB/mmCIF uploads may contain multiple chains, ligands, solvent or proteins. The
+current parser preserves all coordinates present in the uploaded structure. For
+strict DNA-only analyses, upload a DNA-only structure or pre-filter the structure.
+
+14. Numerical resolution
+------------------------
+Projection blur, raster resolution and mode-fit resolution affect image scores.
+These are analysis parameters and must be retained in the analysis JSON.

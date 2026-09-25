@@ -13,22 +13,32 @@ import pandas as pd
 import plotly.graph_objects as go
 import soundfile as sf
 
+from dna_atomic import (
+    AtomicStructure,
+    AtomicStructureError,
+    atomic_density_projection,
+    atomic_edge_target,
+    coarse_to_atomic_surrogate,
+    estimate_helical_pitch_A,
+    generate_3dna_fiber,
+    generate_3dna_sequence_dependent_atomic,
+    load_structure,
+    write_pdb,
+    find_3dna_fiber,
+)
 from dna_cymatics import (
-    PLATE_MATERIALS,
+    STEP_PARAMS,
     build_dna_structure,
     clean_sequence,
-    create_mapped_audio,
-    density_projection,
-    dna_cymatic_target,
     dna_summary,
     fft_components,
-    image_metrics,
-    map_components,
-    rank_square_plate_modes,
-    rank_circular_membrane_modes,
-    reconstruct_from_components,
     hz_to_note,
-    quantize_frequency,
+    image_registration_metrics,
+    image_metrics,
+    polar_harmonic_spectrum,
+    rank_circular_membrane_modes,
+    create_physical_drive_audio,
+    create_musical_audio_from_modes,
 )
 from dna_sources import (
     DEFAULT_GENE_QUERY,
@@ -43,54 +53,61 @@ OUTPUT_ROOT = Path(tempfile.gettempdir()) / "dna_cymatics_outputs"
 OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
 
 
-def _plotly_3d(dna):
-    """Interactive 3D DNA view with automatic transverse magnification.
+# --------------------------- plotting helpers ---------------------------
 
-    A 1,507-bp DNA molecule is physically hundreds of times longer than its
-    ~2-nm diameter. Plotting literal Å coordinates with equal physical aspect
-    ratio makes a correct double helix visually collapse into a line. We
-    therefore magnify X/Y for display only and state the scale in the title.
-    """
-    z_span = max(float(np.ptp(dna.centers[:, 2])), 1e-9)
-    xy_span = max(float(np.ptp(np.vstack([dna.strand1, dna.strand2])[:, :2], axis=0).max()), 1e-9)
-    xy_scale = float(np.clip(0.18 * z_span / xy_span, 1.0, 80.0))
-
-    def tx(points):
-        q = np.asarray(points, dtype=float).copy()
-        q[:, 0] *= xy_scale
-        q[:, 1] *= xy_scale
-        return q
-
-    s1 = tx(dna.strand1)
-    s2 = tx(dna.strand2)
+def _plotly_coarse_3d(dna):
     fig = go.Figure()
     fig.add_trace(go.Scatter3d(
-        x=s1[:, 0], y=s1[:, 1], z=s1[:, 2],
-        mode="lines", name="Strand 1", line=dict(width=7)
+        x=dna.strand1[:, 0], y=dna.strand1[:, 1], z=dna.strand1[:, 2],
+        mode="lines", name="Coarse strand 1", line=dict(width=5),
     ))
     fig.add_trace(go.Scatter3d(
-        x=s2[:, 0], y=s2[:, 1], z=s2[:, 2],
-        mode="lines", name="Strand 2", line=dict(width=7)
+        x=dna.strand2[:, 0], y=dna.strand2[:, 1], z=dna.strand2[:, 2],
+        mode="lines", name="Coarse strand 2", line=dict(width=5),
     ))
-    edges = tx(dna.basepair_edges.reshape(-1, 3)).reshape(dna.basepair_edges.shape)
-    # Plot every Nth base-pair connector so a 1,500-bp sequence remains
-    # interactive without thousands of individual Plotly traces.
-    stride = max(1, len(edges) // 180)
-    for i in range(0, len(edges), stride):
-        edge = edges[i]
+    # Render only a subset of base-pair cross-links for performance.
+    stride = max(1, len(dna.basepair_edges) // 350)
+    for i in range(0, len(dna.basepair_edges), stride):
+        edge = dna.basepair_edges[i]
         fig.add_trace(go.Scatter3d(
             x=edge[:, 0], y=edge[:, 1], z=edge[:, 2], mode="lines",
-            showlegend=False, line=dict(width=2),
+            showlegend=False, line=dict(width=2), hovertext=[f"bp {i+1}", f"bp {i+1}"],
         ))
     fig.update_layout(
-        title=f"Coarse-grained dsDNA — transverse display magnification ×{xy_scale:.1f}",
-        scene=dict(
-            xaxis_title="X (Å) × display scale",
-            yaxis_title="Y (Å) × display scale",
-            zaxis_title="Z (Å)",
-            aspectmode="auto",
-        ),
-        margin=dict(l=0, r=0, t=55, b=0), height=620,
+        title="Sequence-dependent coarse-grained reconstruction",
+        scene=dict(xaxis_title="X (Å)", yaxis_title="Y (Å)", zaxis_title="Z (Å)", aspectmode="data"),
+        margin=dict(l=0, r=0, t=40, b=0), height=620,
+    )
+    return fig
+
+
+def _plotly_atomic_3d(structure: AtomicStructure, max_points: int = 16000):
+    n = structure.n_atoms
+    if n == 0:
+        return go.Figure()
+    if n <= max_points:
+        idx = np.arange(n)
+    else:
+        # Deterministic stratified sampling preserves both ends of a long DNA fiber.
+        idx = np.linspace(0, n - 1, max_points, dtype=int)
+    p = structure.atoms[idx]
+    elements = [structure.elements[i] for i in idx]
+    colors = {"H": "lightgray", "C": "gray", "N": "royalblue", "O": "red", "P": "orange", "S": "yellow"}
+    fig = go.Figure()
+    for element in sorted(set(elements)):
+        mask = np.array([e == element for e in elements])
+        if not mask.any():
+            continue
+        q = p[mask]
+        fig.add_trace(go.Scatter3d(
+            x=q[:, 0], y=q[:, 1], z=q[:, 2],
+            mode="markers", name=element,
+            marker=dict(size=2.6 if element != "H" else 1.7, color=colors.get(element, "white"), opacity=0.75),
+        ))
+    fig.update_layout(
+        title=f"{structure.source} — {structure.dna_form} — {n:,} atoms",
+        scene=dict(xaxis_title="X (Å)", yaxis_title="Y (Å)", zaxis_title="Z (Å)", aspectmode="data"),
+        margin=dict(l=0, r=0, t=40, b=0), height=620,
     )
     return fig
 
@@ -110,17 +127,11 @@ def _image_plot(arr, title, cmap="magma", xlabel=None, ylabel=None):
 
 
 def _difference_plot(a, b):
-    b2 = b
-    if b.shape != a.shape:
-        from scipy.ndimage import zoom
-        b2 = zoom(b, (a.shape[0] / b.shape[0], a.shape[1] / b.shape[1]), order=1)
-    diff = np.abs(a - b2)
-    return _image_plot(diff, "Absolute target / measured difference", cmap="inferno")
+    return _image_plot(np.abs(a - b), "Absolute target / measured difference", cmap="inferno")
 
 
 def _sequence_choices_from_bundle(bundle):
     choices = list(bundle.sequence_catalog().keys())
-    # Prefer the canonical hoxb1a-201 mature mRNA when multiple sequence classes are present.
     choices.sort(key=lambda x: (0 if x.startswith("hoxb1a-201") else 1 if "mature mRNA" in x else 2))
     return choices
 
@@ -168,17 +179,20 @@ def _retrieval_table(bundle):
     return pd.DataFrame(rows)
 
 
+# --------------------------- sequence retrieval ---------------------------
+
 def fetch_gene_action(query, upstream_bp):
     try:
         bundle = retrieve_gene_sequences(query, int(upstream_bp))
         choices = _sequence_choices_from_bundle(bundle)
         default_choice = next((c for c in choices if c.startswith("hoxb1a-201") and "mRNA/cDNA" in c), choices[0])
         catalog = bundle.sequence_catalog()
+        strand = "plus" if bundle.strand == 1 else "minus"
         status_lines = [
             f"### Retrieved **{bundle.symbol}**",
             f"Assembly: **{bundle.assembly}** ({bundle.assembly_accession}) · chromosome **{bundle.chromosome}** · "
-            f"coordinates **{bundle.start:,}–{bundle.end:,}** · strand **{"plus" if bundle.strand == 1 else "minus"}**",
-            f"Genomic sequence: **{len(bundle.genomic_sequence):,} nt** · promoter/upstream: **{len(bundle.promoter_sequence):,} nt**",
+            f"coordinates **{bundle.start:,}–{bundle.end:,}** · strand **{strand}**",
+            f"Genomic sequence: **{len(bundle.genomic_sequence):,} nt** · upstream: **{len(bundle.promoter_sequence):,} nt**",
             "",
             f"[ZFIN gene]({bundle.sources['zfin_gene']}) · [NCBI Gene]({bundle.sources['ncbi_gene']}) · "
             f"[Ensembl gene]({bundle.sources['ensembl_gene']})",
@@ -209,294 +223,344 @@ def load_retrieved_sequence(choice, catalog):
     return catalog[choice]
 
 
+# --------------------------- main modeling pipeline ---------------------------
+
+def _make_atomic_structure(sequence: str, source: str, dna_form: str, pdb_file: str | None, x3dna_path: str | None):
+    coarse = build_dna_structure(sequence, model="sequence-dependent")
+    warning = ""
+    if source == "Uploaded PDB/mmCIF":
+        if not pdb_file:
+            raise AtomicStructureError("Upload a PDB or mmCIF structure first.")
+        return load_structure(pdb_file), coarse, warning
+    if source == "3DNA sequence-dependent atomic rebuild (B-DNA)":
+        try:
+            atomic = generate_3dna_sequence_dependent_atomic(sequence, STEP_PARAMS, dna_form=dna_form, executable=x3dna_path or None)
+            return atomic, coarse, warning
+        except AtomicStructureError as exc:
+            atomic = coarse_to_atomic_surrogate(coarse)
+            warning = (
+                f"3DNA sequence-dependent atomic rebuild was unavailable: {exc} "
+                "Using a parametric atom-site visualization surrogate. Do not use the surrogate for chemical measurements."
+            )
+            return atomic, coarse, warning
+    if source == "3DNA atomistic fiber":
+        try:
+            atomic = generate_3dna_fiber(sequence, dna_form=dna_form, executable=x3dna_path or None)
+            return atomic, coarse, warning
+        except AtomicStructureError as exc:
+            atomic = coarse_to_atomic_surrogate(coarse)
+            warning = (
+                f"3DNA fiber generation was unavailable: {exc} "
+                "Using a parametric atom-site visualization surrogate. Do not use the surrogate for chemical measurements."
+            )
+            return atomic, coarse, warning
+    atomic = coarse_to_atomic_surrogate(coarse)
+    warning = "Using the sequence-only atom-site surrogate; it is for visualization/geometry exploration, not chemical energetics."
+    return atomic, coarse, warning
+
+
 def run_pipeline(
-    sequence, dna_model, projection, projection_size, blur_px, top_components,
-    canvas_width_mm, mapping_mode, pattern_target, plate_material, thickness_mm,
-    membrane_speed, musical_base, musical_octaves, frequency_multiplier,
-    quantization, audio_style, duration_s, tempo_bpm, beats_per_note,
+    sequence, dna_model, structure_source, dna_form, pdb_file, x3dna_path,
+    projection_mode, atom_weighting, projection_size, atomic_blur_A, helical_pitch_A, auto_pitch,
+    target_transform, membrane_radius_mm, membrane_speed, max_angular_mode, max_radial_mode, top_modes,
+    target_type, musical_quantization, physical_duration_per_mode_s, musical_duration_s, tempo_bpm,
 ):
     try:
         seq = clean_sequence(sequence)
-        dna = build_dna_structure(seq, model=dna_model)
-        proj = density_projection(dna, projection=projection, size=int(projection_size), blur_px=float(blur_px))
-        cymatic_target = dna_cymatic_target(dna, size=int(projection_size))
-
-        # Frequency analysis operates on the explicit cymatic target, not the
-        # literal geometric projection. The latter is retained for inspection.
-        canvas_width_m = float(canvas_width_mm) / 1000.0
-        comps, spectrum = fft_components(cymatic_target, canvas_width_m, top_n=int(top_components))
-        E, rho, nu = PLATE_MATERIALS[plate_material]
-
-        mode_note = ""
-        if mapping_mode == "Circular membrane mode search":
-            mode_df, recon = rank_circular_membrane_modes(
-                cymatic_target,
-                radius_m=canvas_width_m / 2.0,
-                wave_speed_m_s=float(membrane_speed),
-                max_m=12,
-                radial_orders=5,
-                top_modes=int(top_components),
-                target_type="Nodal / sand",
-            )
-            freq_df = pd.DataFrame({
-                "component": mode_df["mode_rank"],
-                "fx_cycles/m": np.nan,
-                "fy_cycles/m": np.nan,
-                "spatial_cycles/m": np.nan,
-                "spectral_weight": mode_df["mixture_weight"],
-                "phase_deg": np.nan,
-                "plate_Hz": mode_df["frequency_Hz"],
-                "membrane_Hz": np.nan,
-                "musical_Hz": mode_df["frequency_Hz"],
-                "mapped_Hz": mode_df["frequency_Hz"] * float(frequency_multiplier),
-                "note_Hz": mode_df["frequency_Hz"] * float(frequency_multiplier),
-                "note": [hz_to_note(float(f) * float(frequency_multiplier)) for f in mode_df["frequency_Hz"]],
-                "pattern_correlation": mode_df["pattern_correlation"],
-                "m": mode_df["m"], "n": mode_df["n"],
-            })
-            if quantization == "chromatic":
-                q = [quantize_frequency(float(f), "chromatic")[0] for f in freq_df["note_Hz"]]
-                freq_df["note_Hz"] = q
-                freq_df["note"] = [hz_to_note(float(f)) for f in q]
-            mode_note = (
-                "The target is a DNA-derived radial standing-wave field. The mode table ranks ideal circular-membrane "
-                "eigenmodes by spatial similarity. A real plate will differ until its boundary conditions, material, "
-                "damping and actuator coupling are experimentally calibrated."
-            )
-            from scipy.ndimage import zoom
-            recon = zoom(recon, (proj.image.shape[0] / recon.shape[0], proj.image.shape[1] / recon.shape[1]), order=1)
-        else:
-            freq_df = map_components(
-                comps,
-                canvas_width_m=canvas_width_m,
-                mapping_mode=mapping_mode,
-                thickness_m=float(thickness_mm) / 1000.0,
-                young_pa=E,
-                density_kg_m3=rho,
-                poisson=nu,
-                membrane_speed_m_s=float(membrane_speed),
-                musical_base_hz=float(musical_base),
-                musical_octaves=float(musical_octaves),
-                frequency_multiplier=float(frequency_multiplier),
-                quantization=quantization,
-            )
-            recon = reconstruct_from_components(cymatic_target, comps)
-            mode_note = (
-                "The FFT mapping is a reproducible sonification of the DNA-derived cymatic target. It is not a unique "
-                "physical inverse of a real plate or membrane."
-            )
-
-        audio, note_sequence = create_mapped_audio(
-            freq_df, style=audio_style, duration_s=float(duration_s), tempo_bpm=float(tempo_bpm),
-            beats_per_note=float(beats_per_note),
+        coarse = build_dna_structure(seq, model=dna_model)
+        atomic, coarse_for_plot, structure_warning = _make_atomic_structure(seq, structure_source, dna_form, pdb_file, x3dna_path)
+        effective_pitch_A = estimate_helical_pitch_A(coarse.step_df, default_A=float(helical_pitch_A)) if bool(auto_pitch) else float(helical_pitch_A)
+        literal_proj = atomic_density_projection(
+            atomic, mode="Axial atomic density", size=int(projection_size), blur_A=float(atomic_blur_A),
+            point_weighting=atom_weighting, helical_pitch_A=effective_pitch_A,
         )
+        if projection_mode == "Axial atomic density":
+            selected_proj = literal_proj
+        else:
+            selected_proj = atomic_density_projection(
+                atomic, mode=projection_mode, size=int(projection_size), blur_A=float(atomic_blur_A),
+                point_weighting=atom_weighting, helical_pitch_A=effective_pitch_A,
+            )
+        target = selected_proj.image
+        if target_transform == "Edge / nodal geometry":
+            target = atomic_edge_target(target, blur_sigma_px=1.0)
+        modes, mode_recon = rank_circular_membrane_modes(
+            target,
+            radius_m=float(membrane_radius_mm) / 1000.0,
+            wave_speed_m_s=float(membrane_speed),
+            max_angular_mode=int(max_angular_mode),
+            max_radial_mode=int(max_radial_mode),
+            top_modes=int(top_modes),
+            target_type=target_type,
+        )
+
+        physical_audio, physical_events = create_physical_drive_audio(
+            modes, duration_per_mode_s=float(physical_duration_per_mode_s), use_exact_frequencies=True
+        )
+        best_mode_audio, best_mode_events = create_physical_drive_audio(
+            modes.head(1), duration_per_mode_s=max(float(physical_duration_per_mode_s), 3.0), use_exact_frequencies=True
+        )
+        musical_audio, musical_events = create_musical_audio_from_modes(
+            modes, duration_s=float(musical_duration_s), tempo_bpm=float(tempo_bpm),
+            quantization=musical_quantization,
+        )
+
+        spectrum_components, spectrum = fft_components(
+            target, canvas_width_m=2.0 * float(membrane_radius_mm) / 1000.0, top_n=min(24, int(top_modes)),
+        )
+        harmonics = polar_harmonic_spectrum(target, max_m=32)
+        summary = dna_summary(coarse)
 
         run_dir = OUTPUT_ROOT / uuid4().hex
         run_dir.mkdir(parents=True, exist_ok=False)
-        wav_path = run_dir / "dna_cymatics.wav"
-        csv_path = run_dir / "frequency_components.csv"
-        p_png = run_dir / "dna_projection.png"
-        s_png = run_dir / "spatial_spectrum.png"
-        r_png = run_dir / "reconstruction.png"
+        literal_png = run_dir / "atomic_axial_projection.png"
+        target_png = run_dir / "cymatics_target.png"
+        spectrum_png = run_dir / "spatial_spectrum.png"
+        modes_png = run_dir / "circular_mode_reconstruction.png"
+        atomic_pdb = run_dir / "atomic_structure.pdb"
+        physical_wav = run_dir / "physical_drive_all_candidates.wav"
+        best_mode_wav = run_dir / "physical_drive_best_mode.wav"
+        musical_wav = run_dir / "dna_musical_sonification.wav"
+        mode_csv = run_dir / "circular_modes.csv"
+        harmonic_csv = run_dir / "polar_harmonics.csv"
+        spectrum_csv = run_dir / "spatial_frequency_components.csv"
         json_path = run_dir / "analysis.json"
-        bundle_path = run_dir / "dna_cymatics_bundle.zip"
+        bundle_path = run_dir / "dna_cymatics_analysis.zip"
 
-        sf.write(wav_path, audio, 44_100, subtype="PCM_16")
-        freq_df.to_csv(csv_path, index=False)
+        sf.write(physical_wav, physical_audio, 44_100, subtype="PCM_16")
+        sf.write(best_mode_wav, best_mode_audio, 44_100, subtype="PCM_16")
+        sf.write(musical_wav, musical_audio, 44_100, subtype="PCM_16")
+        modes.to_csv(mode_csv, index=False)
+        harmonics.drop(columns=["complex_amplitude"], errors="ignore").to_csv(harmonic_csv, index=False)
+        pd.DataFrame(spectrum_components).to_csv(spectrum_csv, index=False)
+        write_pdb(atomic, atomic_pdb)
 
-        target_png = run_dir / "dna_cymatic_target.png"
-        figures = [
-            (p_png, proj.image, f"Geometric 2D projection — {projection}", "magma"),
-            (target_png, cymatic_target, "DNA-derived cymatic target", "magma"),
-            (s_png, spectrum, "Log spatial spectrum of cymatic target", "viridis"),
-            (r_png, recon, "Model reconstruction / modal mixture", "magma"),
-        ]
-        for path, arr, title, cmap in figures:
+        for path, arr, title, cmap in [
+            (literal_png, literal_proj.image, "Literal axial atomic-density projection", "magma"),
+            (target_png, target, f"Cymatics target — {projection_mode} + {target_transform}", "magma"),
+            (spectrum_png, spectrum, "Spatial Fourier spectrum", "viridis"),
+            (modes_png, mode_recon, "Circular membrane mode-family reconstruction (exploratory)", "magma"),
+        ]:
             fig = _image_plot(arr, title, cmap=cmap)
             fig.savefig(path, bbox_inches="tight")
             plt.close(fig)
 
-        summary = dna_summary(dna)
         payload = {
-            "dna_summary": summary,
-            "settings": {
-                "dna_model": dna_model, "projection": projection,
-                "projection_size": int(projection_size), "blur_px": float(blur_px),
-                "cymatic_target": "DNA-driven circular standing-wave target",
-                "top_components": int(top_components), "canvas_width_mm": float(canvas_width_mm),
-                "mapping_mode": mapping_mode, "pattern_target": pattern_target,
-                "plate_material": plate_material, "thickness_mm": float(thickness_mm),
-                "membrane_speed_m_s": float(membrane_speed), "frequency_multiplier": float(frequency_multiplier),
-                "quantization": quantization, "audio_style": audio_style,
+            "software": {"version": "0.5", "application": "DNA-Cymatics"},
+            "sequence": {"length_bp": len(seq), "sha256": __import__('hashlib').sha256(seq.encode()).hexdigest(), "model": dna_model},
+            "structure": {
+                "source": atomic.source, "dna_form": atomic.dna_form, "n_atoms": atomic.n_atoms,
+                "metadata": atomic.metadata, "warning": structure_warning,
             },
-            "note_sequence": [{"frequency_Hz": float(f), "note": n} for f, n in note_sequence],
-            "components": freq_df.to_dict(orient="records"),
+            "projection": {
+                "literal_mode": "Axial atomic density",
+                "selected_mode": projection_mode,
+                "target_transform": target_transform,
+                "point_weighting": atom_weighting,
+                "helical_pitch_A": effective_pitch_A,
+                "width_A": selected_proj.width_A,
+                "height_A": selected_proj.height_A,
+                "element_counts": selected_proj.element_counts,
+            },
+            "resonator": {
+                "model": "ideal circular tension-dominated membrane",
+                "radius_m": float(membrane_radius_mm) / 1000.0,
+                "wave_speed_m_s": float(membrane_speed),
+                "note": "Experimental metal plates require calibration/FEM; this is not a universal Chladni frequency model.",
+            },
+            "modes": modes.to_dict(orient="records"),
+            "physical_events": physical_events,
+            "best_mode_events": best_mode_events,
+            "musical_events": musical_events,
+            "summary": summary,
         }
         json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         with zipfile.ZipFile(bundle_path, "w", zipfile.ZIP_DEFLATED) as z:
-            for p in [wav_path, csv_path, p_png, target_png, s_png, r_png, json_path]:
+            for p in [literal_png, target_png, spectrum_png, modes_png, atomic_pdb, physical_wav, best_mode_wav, musical_wav, mode_csv, harmonic_csv, spectrum_csv, json_path]:
                 z.write(p, p.name)
 
-        text = (
-            f"**{len(seq):,} bp** · GC **{summary['GC_percent']:.1f}%** · "
-            f"estimated turns **{summary['estimated_turns']:.2f}**\n\n{mode_note}\n\n"
-            f"Generated **{len(freq_df)}** frequency/mode entries from the DNA-derived cymatic target and a **{float(duration_s):.1f} s** WAV."
-        )
+        note_lines = [
+            f"**{len(seq):,} bp** · GC **{summary['GC_percent']:.1f}%** · estimated B-style turns **{summary['estimated_turns']:.2f}**",
+            f"Atomic structure: **{atomic.source}** · **{atomic.n_atoms:,} atoms**",
+            f"2D reference: **literal axial atomic density** · selected target source: **{projection_mode}** · target transform: **{target_transform}**",
+            f"Atomic weighting: **{atom_weighting}** · helical pitch used for folding: **{effective_pitch_A:.3f} Å**",
+            f"Circular membrane: radius **{float(membrane_radius_mm):.1f} mm**, wave speed **{float(membrane_speed):.1f} m/s**",
+        ]
+        if structure_warning:
+            note_lines.append(f"⚠️ {structure_warning}")
+        note_lines += [
+            "",
+            "**Physical-drive interpretation:** the exact resonances are emitted one mode at a time. "
+            "The BEST SINGLE MODE WAV is the primary physical test signal. The musical WAV is a separate sonification and is not expected to generate a static Chladni pattern.",
+        ]
+
         return (
-            _plotly_3d(dna),
-            _image_plot(proj.image, f"Geometric 2D projection — {projection}", cmap="magma", xlabel=proj.x_label, ylabel=proj.y_label),
-            _image_plot(cymatic_target, "DNA-derived cymatic target", cmap="magma"),
-            _image_plot(spectrum, "Log spatial spectrum of cymatic target", cmap="viridis"),
-            _image_plot(recon, "Model reconstruction / modal mixture", cmap="magma"),
-            freq_df, text, str(wav_path), str(bundle_path),
-            cymatic_target,
+            _plotly_atomic_3d(atomic) if structure_source != "Sequence-dependent coarse model" else _plotly_coarse_3d(coarse_for_plot),
+            _image_plot(literal_proj.image, "Literal axial atomic-density projection", cmap="magma", xlabel="Å", ylabel="Å"),
+            _image_plot(target, f"Cymatics target — {projection_mode} + {target_transform}", cmap="magma", xlabel="normalized X", ylabel="normalized Y"),
+            _image_plot(spectrum, "Spatial Fourier spectrum", cmap="viridis"),
+            _image_plot(mode_recon, "Circular membrane mode reconstruction", cmap="magma"),
+            modes,
+            "\n\n".join(note_lines),
+            str(physical_wav),
+            str(best_mode_wav),
+            str(musical_wav),
+            str(bundle_path),
+            target,
         )
     except Exception as exc:
         raise gr.Error(str(exc)) from exc
 
+
+# --------------------------- experimental verification ---------------------------
 
 def verify_cymatics(dna_reference, measured_image, threshold):
     if dna_reference is None:
-        raise gr.Error("Generate a DNA projection first.")
+        raise gr.Error("Generate a DNA target first.")
     if measured_image is None:
-        raise gr.Error("Upload or capture a measured cymatics image first.")
+        raise gr.Error("Upload a measured cymatics image first.")
     try:
-        metrics = image_metrics(np.asarray(dna_reference, dtype=float), np.asarray(measured_image), threshold=float(threshold))
-        measured_gray = np.asarray(measured_image)
-        if measured_gray.ndim == 3:
-            measured_gray = np.mean(measured_gray[..., :3], axis=2)
-        ref = np.asarray(dna_reference, dtype=float)
-        from scipy.ndimage import zoom
-        measured_gray = zoom(measured_gray, (ref.shape[0] / measured_gray.shape[0], ref.shape[1] / measured_gray.shape[1]), order=1)
-        diff_fig = _difference_plot(ref, measured_gray)
-        md = "### Experimental verification\n\n" + "\n".join(f"**{k}:** {v:.4f}" for k, v in metrics.items())
+        measured = np.asarray(measured_image)
+        if measured.ndim == 3:
+            measured = np.mean(measured[..., :3], axis=2)
+        result = image_registration_metrics(np.asarray(dna_reference, dtype=float), measured, threshold=float(threshold))
+        aligned = result.pop("aligned_image")
+        md = "### Experimental verification\n\n" + "\n".join(f"**{k}:** {v:.4f}" if isinstance(v, float) else f"**{k}:** {v}" for k, v in result.items())
         md += (
-            "\n\nThese are image-similarity metrics only. They do not establish that the plate is being driven "
-            "in the intended eigenmode unless the drive frequency, plate geometry, boundary condition and "
-            "actuator coupling have also been recorded."
+            "\n\nThe registration is an image-processing step; it does not prove frequency causality. "
+            "For a defensible physical validation, record the resonator geometry, boundary condition, actuator location, "
+            "drive frequency, drive amplitude, and the camera image at the same time."
         )
-        return diff_fig, md
+        return _difference_plot(np.asarray(dna_reference), aligned), md
     except Exception as exc:
         raise gr.Error(str(exc)) from exc
+
+
+def three_dna_status(path):
+    exe = find_3dna_fiber(path or None)
+    if exe:
+        return f"✅ 3DNA fiber found: `{exe}`"
+    return "⚠️ 3DNA fiber not found. The app will use the documented sequence-only atom-site surrogate unless you upload a structure."
 
 
 with gr.Blocks(title="DNA → Cymatics → Music") as demo:
     gr.Markdown(
         """
-# DNA → 3D Shape → 2D Pattern → Frequencies → Music
+# DNA → 3D Atomic Geometry → 2D Molecular Pattern → Resonant Modes → Music
 
-This app performs a reproducible **DNA sequence → coarse-grained 3D geometry → 2D projection → spatial-frequency → audio** workflow and includes a database-backed sequence retrieval layer.
+This research application now separates three different things that should not be conflated:
 
-The initial canonical sequence is **hoxb1a-201**, the 1,507-nt zebrafish mature mRNA/cDNA sequence referenced by ZFIN. The retrieval tab can load current genomic DNA from **GRCz12tu**, all Ensembl transcripts and CDS sequences, NCBI RefSeq transcript cross-checks, and a configurable promoter/upstream region.
+**(1) molecular structure**, **(2) a 2D target pattern derived from molecular coordinates**, and **(3) a physical resonator response**.
 
-> **Physical interpretation:** DNA reconstruction is coarse-grained, the FFT route is sonification, and the plate-mode search is an analytical simply-supported plate model. Real cymatics depends on the actual resonator, boundary conditions, damping, actuator coupling, and measurement system.
+The canonical sequence is **zebrafish hoxb1a-201**, 1,507 nt. The default atomic path uses a 3DNA fiber model when 3DNA is installed; otherwise an explicitly labeled parametric atom-site surrogate is used. A real PDB/mmCIF structure can also be uploaded.
+
+> A literal side projection of a long DNA molecule is expected to be line-like. The molecular target used for cymatics is instead an **axial atomic-density projection** (or an explicitly labeled helical phase-folded projection). This is analogous to the axial molecular views used in structural DNA work.
         """
     )
 
     with gr.Tab("Gene / Sequence Retrieval"):
         with gr.Row():
             with gr.Column(scale=2):
-                gene_query = gr.Textbox(
-                    value=DEFAULT_GENE_QUERY,
-                    label="Gene identifier / symbol / ZFIN URL",
-                    info="Example: ZDB-GENE-990415-101, hoxb1a, or an NCBI GeneID.",
-                )
+                gene_query = gr.Textbox(value=DEFAULT_GENE_QUERY, label="Gene identifier / symbol / ZFIN URL")
             with gr.Column(scale=1):
-                upstream_bp = gr.Slider(0, 10_000, value=DEFAULT_UPSTREAM_BP, step=100, label="Promoter / upstream length (bp)")
+                upstream_bp = gr.Slider(0, 10_000, value=DEFAULT_UPSTREAM_BP, step=100, label="Upstream sequence length (bp)")
                 fetch_button = gr.Button("Fetch current gene sequences", variant="primary")
         retrieval_status = gr.Markdown()
         retrieval_table = gr.Dataframe(label="Retrieved sequence inventory", wrap=True, interactive=False)
         with gr.Row():
             sequence_choice = gr.Dropdown(label="Sequence to load into DNA workflow", choices=[], interactive=True)
-            sequence_download = gr.File(label="Download retrieved FASTA package")
+            sequence_download = gr.File(label="Download FASTA package")
         retrieval_catalog = gr.State({})
 
-    with gr.Tab("DNA → Pattern → Music"):
+    with gr.Tab("Structure → 2D Target → Modes → Audio"):
         with gr.Row():
             with gr.Column(scale=1):
-                sequence = gr.Textbox(
-                    value=SAMPLE_DNA,
-                    lines=8,
-                    label="DNA sequence (5′→3′)",
-                    info="Default: hoxb1a-201 mature mRNA/cDNA (1,507 nt). Genomic DNA and CDS can be loaded from the retrieval tab.",
+                sequence = gr.Textbox(value=SAMPLE_DNA, lines=8, label="DNA sequence (5′→3′)", info="Canonical hoxb1a-201 = 1,507 nt")
+                dna_model = gr.Radio(["sequence-dependent", "canonical"], value="sequence-dependent", label="Coarse DNA model")
+                structure_source = gr.Radio(
+                    ["3DNA sequence-dependent atomic rebuild (B-DNA)", "3DNA atomistic fiber", "Uploaded PDB/mmCIF", "Sequence-dependent coarse model"],
+                    value="3DNA sequence-dependent atomic rebuild (B-DNA)", label="3D structure source"
                 )
-                dna_model = gr.Radio(["sequence-dependent", "canonical"], value="sequence-dependent", label="DNA geometry model")
-                projection = gr.Dropdown(["XY (top)", "XZ (side)", "YZ (side)", "PCA"], value="XY (top)", label="Geometric 2D projection")
-                projection_size = gr.Slider(128, 1024, value=512, step=64, label="Projection resolution")
-                blur_px = gr.Slider(0.0, 6.0, value=1.4, step=0.1, label="2D rendering blur (pixels)")
-                top_components = gr.Slider(4, 48, value=16, step=1, label="Frequency / mode count")
+                dna_form = gr.Dropdown(["A-DNA", "B-DNA", "C-DNA", "Z-DNA", "A-RNA"], value="B-DNA", label="3DNA conformational form")
+                pdb_file = gr.File(file_types=[".pdb", ".cif", ".mmcif"], type="filepath", label="Optional PDB/mmCIF structure")
+                x3dna_path = gr.Textbox(label="Optional 3DNA fiber executable or X3DNA directory", placeholder="e.g. C:\\x3dna-v2.4\\bin\\fiber")
+                check_3dna = gr.Button("Check 3DNA")
+                dna_status = gr.Markdown()
             with gr.Column(scale=1):
-                canvas_width_mm = gr.Slider(50, 1000, value=300, step=10, label="Physical plate width (mm)")
-                mapping_mode = gr.Radio(
-                    ["Thin plate", "Membrane", "Musical radial", "Circular membrane mode search", "Square plate mode search"],
-                    value="Circular membrane mode search", label="Frequency model"
+                projection_mode = gr.Radio(
+                    ["Axial atomic density", "Single-turn axial density", "Helical phase-folded density"],
+                    value="Single-turn axial density", label="2D molecular projection / target source",
+                    info="Literal axial = whole molecule. Single-turn = one helical pitch. Phase-folded = all turns co-registered; derived, not a literal camera view."
                 )
-                pattern_target = gr.Radio(["DNA density", "Nodal / sand"], value="Nodal / sand", label="Target interpretation")
-                plate_material = gr.Dropdown(list(PLATE_MATERIALS.keys()), value="Steel", label="Plate material")
-                thickness_mm = gr.Slider(0.2, 3.0, value=1.0, step=0.1, label="Plate thickness (mm)")
-                membrane_speed = gr.Slider(20, 1000, value=120, step=5, label="Membrane wave speed (m/s)")
-                musical_base = gr.Slider(55, 440, value=110, step=5, label="Musical base frequency (Hz)")
-                musical_octaves = gr.Slider(1, 8, value=4, step=0.25, label="Musical octave span")
-                frequency_multiplier = gr.Slider(0.01, 100, value=1.0, step=0.01, label="Frequency multiplier")
-                quantization = gr.Radio(["chromatic", "none"], value="chromatic", label="Musical quantization")
-                audio_style = gr.Radio(["Arpeggio", "Chord", "Arpeggio + Drone"], value="Arpeggio", label="Audio style")
-                duration_s = gr.Slider(4, 60, value=16, step=1, label="Audio duration (s)")
-                tempo_bpm = gr.Slider(40, 180, value=100, step=1, label="Tempo (BPM)")
-                beats_per_note = gr.Slider(0.25, 4, value=1, step=0.25, label="Beats per note")
-                run = gr.Button("Generate", variant="primary")
+                atom_weighting = gr.Radio(["Uniform", "Atomic mass"], value="Uniform", label="Atomic density weighting")
+                projection_size = gr.Slider(128, 1024, value=512, step=64, label="2D resolution")
+                atomic_blur_A = gr.Slider(0.0, 2.0, value=0.35, step=0.05, label="Atomic density blur (Å)")
+                helical_pitch_A = gr.Slider(28, 60, value=34.0, step=0.1, label="Helical pitch for phase fold (Å)")
+                auto_pitch = gr.Checkbox(value=True, label="Estimate phase-fold pitch from sequence-dependent step geometry")
+                target_transform = gr.Radio(["Density", "Edge / nodal geometry"], value="Edge / nodal geometry", label="Cymatics target transform")
+                membrane_radius_mm = gr.Slider(25, 500, value=150, step=5, label="Circular resonator radius (mm)")
+                membrane_speed = gr.Slider(10, 2000, value=120, step=5, label="Membrane wave speed (m/s)")
+                max_angular_mode = gr.Slider(0, 32, value=18, step=1, label="Maximum angular mode m")
+                max_radial_mode = gr.Slider(1, 20, value=10, step=1, label="Maximum radial mode n")
+                top_modes = gr.Slider(1, 20, value=8, step=1, label="Top resonant modes")
+                target_type = gr.Radio(["Nodal / sand", "Displacement magnitude"], value="Nodal / sand", label="Target interpretation")
+                musical_quantization = gr.Radio(["none", "chromatic"], value="none", label="Musical pitch quantization")
+                physical_duration_per_mode_s = gr.Slider(0.5, 10, value=2.5, step=0.5, label="Physical drive seconds per mode")
+                musical_duration_s = gr.Slider(8, 120, value=24, step=1, label="Musical WAV duration (s)")
+                tempo_bpm = gr.Slider(40, 180, value=96, step=1, label="Musical tempo (BPM)")
+                run = gr.Button("Build molecular target + resonant modes", variant="primary")
 
         gr.Markdown("## Results")
         with gr.Row():
-            out_3d = gr.Plot(label="3D reconstruction")
-            out_projection = gr.Plot(label="Geometric 2D projection")
+            out_3d = gr.Plot(label="3D structure")
+            out_projection_literal = gr.Plot(label="Literal axial atomic projection")
         with gr.Row():
-            out_cymatic = gr.Plot(label="DNA-derived cymatic target")
-            out_spectrum = gr.Plot(label="Spatial spectrum")
-        with gr.Row():
-            out_recon = gr.Plot(label="Pattern reconstruction")
-        out_table = gr.Dataframe(label="Derived frequencies / plate modes", wrap=True)
+            out_projection_target = gr.Plot(label="Cymatics target")
+            out_recon = gr.Plot(label="Circular membrane mode-family reconstruction")
+        out_spectrum = gr.Plot(label="Spatial Fourier spectrum")
+        out_table = gr.Dataframe(label="Candidate circular membrane resonances", wrap=True)
         out_summary = gr.Markdown()
         with gr.Row():
-            out_audio = gr.Audio(label="Generated WAV", type="filepath")
-            out_bundle = gr.File(label="Analysis bundle")
+            physical_audio = gr.Audio(label="Physical drive WAV — all candidate modes, exact frequencies", type="filepath")
+            best_mode_audio = gr.Audio(label="Physical drive WAV — BEST SINGLE CANDIDATE MODE", type="filepath")
+            musical_audio = gr.Audio(label="Musical sonification WAV (creative; not a physical cymatics drive)", type="filepath")
+        out_bundle = gr.File(label="Full analysis bundle")
         reference_state = gr.State(None)
-        gr.Markdown(
-            "**Important:** the geometric projection and the cymatic target are intentionally separate. "
-            "A long DNA molecule viewed from the side is line-like, while a circular resonator produces radial standing-wave patterns. "
-            "The cymatic target is the explicit mathematical bridge used for frequency inversion."
-        )
 
         run.click(
             fn=run_pipeline,
-            inputs=[sequence, dna_model, projection, projection_size, blur_px, top_components,
-                    canvas_width_mm, mapping_mode, pattern_target, plate_material, thickness_mm,
-                    membrane_speed, musical_base, musical_octaves, frequency_multiplier,
-                    quantization, audio_style, duration_s, tempo_bpm, beats_per_note],
-            outputs=[out_3d, out_projection, out_cymatic, out_spectrum, out_recon, out_table, out_summary, out_audio, out_bundle, reference_state],
+            inputs=[sequence, dna_model, structure_source, dna_form, pdb_file, x3dna_path,
+                    projection_mode, atom_weighting, projection_size, atomic_blur_A, helical_pitch_A, auto_pitch,
+                    target_transform, membrane_radius_mm, membrane_speed, max_angular_mode, max_radial_mode, top_modes,
+                    target_type, musical_quantization, physical_duration_per_mode_s, musical_duration_s, tempo_bpm],
+            outputs=[out_3d, out_projection_literal, out_projection_target, out_spectrum, out_recon, out_table, out_summary,
+                     physical_audio, best_mode_audio, musical_audio, out_bundle, reference_state],
         )
+        check_3dna.click(fn=three_dna_status, inputs=[x3dna_path], outputs=[dna_status])
 
     with gr.Tab("Experimental Cymatics Verification"):
         gr.Markdown(
             """
-### Close the loop with a real plate
+### Quantitatively test a real resonator
 
-1. Generate a DNA target in the first tab.
-2. Build a plate/resonator matching the dimensions and material settings.
-3. Drive the plate with a calibrated sine wave at one candidate resonance at a time.
-4. Photograph the resulting sand/flour/nodal pattern.
-5. Upload the image here and compare it with the generated target.
+1. Generate a molecular target and choose one candidate resonance.
+2. Drive the physical resonator at the **exact, unquantized physical frequency**.
+3. Record the plate geometry, mounting, actuator position, frequency and amplitude.
+4. Photograph the resulting powder/sand/liquid pattern.
+5. Upload the image and compare it with the molecular target.
 
-For a **single static Chladni figure**, test one resonance/mode at a time. Playing several unrelated notes together usually creates a time-varying superposition rather than one static target pattern.
+The comparison includes translation registration, RMSE, Pearson correlation, Dice, IoU, a 95th-percentile boundary-distance metric, and angular-harmonic correlation.
+
+A high image similarity score is evidence of pattern similarity; it is not, by itself, proof that the DNA caused that physical frequency or that the physical system is uniquely identified.
             """
         )
         measured_image = gr.Image(type="numpy", image_mode="L", label="Measured Chladni / cymatics image")
         threshold = gr.Slider(0.1, 0.9, value=0.55, step=0.01, label="Binary overlap threshold")
-        verify = gr.Button("Compare measured pattern with DNA target", variant="primary")
+        verify = gr.Button("Compare measured pattern with molecular target", variant="primary")
         out_diff = gr.Plot(label="Difference map")
         out_metrics = gr.Markdown()
         verify.click(fn=verify_cymatics, inputs=[reference_state, measured_image, threshold], outputs=[out_diff, out_metrics])
 
-    # Wire cross-tab events after every referenced component has been constructed.
     fetch_button.click(
         fn=fetch_gene_action,
         inputs=[gene_query, upstream_bp],
@@ -508,10 +572,11 @@ For a **single static Chladni figure**, test one resonance/mode at a time. Playi
         """
 ### Model boundaries
 
-The DNA geometry is a sequence-dependent coarse-grained reconstruction using six standard base-pair-step variables: Tilt, Roll, Twist, Shift, Slide and Rise. The mode search is an analytical **simply-supported** plate model. It is not a finite-element simulation of an arbitrary real plate. For laboratory-grade prediction, calibrate the real resonator and actuator and then use measured images/frequencies in the verification loop.
+The most rigorous sequence-only structural path available in this app is the 3DNA sequence-dependent atomic rebuild when 3DNA `rebuild` + `cp_std` are installed. The 3DNA fiber path is an idealized conformational reference. 3DNA's `fiber` models generate atomic coordinates for standard A/B/C/Z families; its `rebuild -atomic` workflow can also reconstruct atomic coordinates from base-pair-step parameters. The bundled Python sequence-dependent model remains a coarse-grained approximation.
+
+The **axial atomic-density image is a true projection of the loaded atom coordinates**. The **helical phase-folded image is a derived coordinate transform**, not a literal camera projection. The circular membrane solver is an ideal tension-dominated membrane; real Chladni plates require measured/calibrated resonator models, boundary conditions and actuator coupling.
         """
     )
-
 
 if __name__ == "__main__":
     demo.launch(server_name="127.0.0.1", server_port=7860, show_error=True, theme=gr.themes.Soft())

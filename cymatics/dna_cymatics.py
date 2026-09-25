@@ -8,7 +8,6 @@ import numpy as np
 import pandas as pd
 from scipy.ndimage import gaussian_filter, zoom
 from scipy.optimize import nnls
-from scipy.special import jv, jn_zeros
 
 
 # The 10 unique DNA dinucleotide steps are sufficient because of reverse-complement
@@ -126,19 +125,12 @@ def build_dna_structure(
     model: str = "sequence-dependent",
     backbone_radius_A: float = 10.0,
 ) -> DNA3D:
-    """Build a visually/structurally coherent coarse-grained dsDNA model.
+    """Build a sequence-dependent coarse-grained dsDNA reconstruction.
 
-    The previous implementation propagated roll/tilt as cumulative frame
-    rotations and also accumulated slide/shift into the centerline. Over a
-    1,500-bp transcript that produces an artificial macroscopic bend and can
-    make the entire molecule look like a line in every projection.
-
-    This implementation preserves the B-DNA helical axis along +Z while still
-    using sequence-dependent twist, roll, tilt, slide and shift as *local*
-    base-pair-step properties. The centerline uses the cumulative rise and the
-    local shift/slide perturbation is applied without integrating it as a
-    persistent bend. It is intentionally a coarse-grained visualization, not
-    an atomistic structure or MD trajectory.
+    This is a rigid-base-pair-step reconstruction, not an atomistic molecular
+    dynamics simulation. It captures sequence-dependent local twist, roll,
+    tilt, shift, slide and rise and then places two coarse backbone loci around
+    each local base-pair frame.
     """
     seq = clean_sequence(sequence)
     if model not in {"sequence-dependent", "canonical"}:
@@ -151,16 +143,7 @@ def build_dna_structure(
     frames = np.zeros((n, 3, 3), dtype=float)
     frames[0] = np.eye(3)
 
-    theta = 0.0
-    z = 0.0
     step_rows: List[dict] = []
-
-    # Local perturbations are intentionally bounded. The experimental base-pair
-    # step values describe local geometry; summing slide/shift over 1500 bp as a
-    # random walk would not be an appropriate visualization of a stable B-DNA
-    # axis for this application.
-    local_center_scale = 0.35
-
     for i in range(n - 1):
         step = seq[i : i + 2]
         if model == "canonical":
@@ -168,35 +151,32 @@ def build_dna_structure(
         else:
             p = STEP_PARAMS[step]
 
-        theta += math.radians(p["twist"])
-        z += float(p["rise"])
+        local_R = (
+            _rz(math.radians(p["twist"]))
+            @ _ry(math.radians(p["roll"]))
+            @ _rx(math.radians(p["tilt"]))
+        )
+        local_t = np.array([p["shift"], p["slide"], p["rise"]], dtype=float)
 
-        # Keep the global helical axis straight. Apply slide/shift as a small
-        # local displacement in the current base-pair plane rather than a
-        # cumulative translation of the molecular axis.
-        Rz = _rz(theta)
-        local_offset = local_center_scale * np.array([p["shift"], p["slide"], 0.0], dtype=float)
-        centers[i + 1] = np.array([0.0, 0.0, z]) + Rz @ local_offset
-
-        # Local roll/tilt alter the base-pair frame but do not create an
-        # artificial many-kilobase global bend.
-        frames[i + 1] = Rz @ _ry(math.radians(p["roll"])) @ _rx(math.radians(p["tilt"]))
+        # Matrix convention: frame[i] maps local coordinates into global.
+        frames[i + 1] = frames[i] @ local_R
+        centers[i + 1] = centers[i] + frames[i] @ local_t
         step_rows.append({"index": i + 1, "step": step, **p})
 
     strand1 = np.zeros_like(centers)
     strand2 = np.zeros_like(centers)
     basepair_edges = np.zeros((n, 2, 3), dtype=float)
 
-    # Phase offset approximates the two backbone loci relative to the base-pair
-    # local x-axis. The exact atomic backbone is outside the scope of this model.
+    # The simple backbone radius is intentionally a visualization scale rather
+    # than an atomically reconstructed phosphate/sugar backbone.
     phase = math.radians(12.0)
-    radial = backbone_radius_A * np.array([math.cos(phase), math.sin(phase), 0.0])
-    anti = -radial
+    a = backbone_radius_A * np.array([math.cos(phase), math.sin(phase), 0.0])
+    b = backbone_radius_A * np.array([math.cos(phase + math.pi), math.sin(phase + math.pi), 0.0])
     for i in range(n):
-        strand1[i] = centers[i] + frames[i] @ radial
-        strand2[i] = centers[i] + frames[i] @ anti
-        basepair_edges[i, 0] = centers[i] + frames[i] @ (0.92 * radial)
-        basepair_edges[i, 1] = centers[i] + frames[i] @ (0.92 * anti)
+        strand1[i] = centers[i] + frames[i] @ a
+        strand2[i] = centers[i] + frames[i] @ b
+        basepair_edges[i, 0] = centers[i] + frames[i] @ (0.92 * a)
+        basepair_edges[i, 1] = centers[i] + frames[i] @ (0.92 * b)
 
     step_df = pd.DataFrame(step_rows)
     return DNA3D(seq, centers, strand1, strand2, basepair_edges, frames, step_df)
@@ -253,131 +233,6 @@ def density_projection(
     if peak > 0:
         image /= peak
     return Projection2D(image=image, xy=xy, x_label=xlabel, y_label=ylabel, width_A=side, height_A=side)
-
-
-def dna_cymatic_target(
-    dna: DNA3D,
-    size: int = 512,
-    max_angular_mode: int = 12,
-    radial_modes: int = 3,
-    nodal_width: float = 0.17,
-    radial_bias: float = 0.55,
-) -> np.ndarray:
-    """Create a radial, snowflake-like DNA-derived cymatic target field.
-
-    This is deliberately separated from the geometric projection. A literal
-    top-down projection of a long B-DNA molecule is approximately cylindrical
-    (an annulus), whereas a Chladni/cymatics image is a resonant wavefield. This
-    transform converts sequence order + helical phase into angular Fourier
-    content, then expands that content in circular standing-wave basis
-    functions. The result is an explicit *cymatic target*, suitable for inverse
-    mode fitting, rather than claiming that a raw projection is itself a
-    Chladni pattern.
-
-    The target is therefore an engineered mathematical bridge between the DNA
-    geometry and a circular resonator. It is not a claim that DNA intrinsically
-    generates these frequencies in nature.
-    """
-    size = int(size)
-    if not 64 <= size <= 2048:
-        raise ValueError("Target size must be between 64 and 2048 pixels.")
-    if radial_modes < 1 or max_angular_mode < 2:
-        raise ValueError("Need at least two angular modes and one radial mode.")
-
-    seq = dna.sequence
-    n = len(seq)
-    # Use several orthogonal scalar encodings so A/T/G/C do not collapse into a
-    # single overly-symmetric signal.
-    code = {
-        "A": np.array([1.0, 1.0, 0.0]),
-        "T": np.array([-1.0, 1.0, 0.0]),
-        "G": np.array([0.0, -1.0, 1.0]),
-        "C": np.array([0.0, -1.0, -1.0]),
-    }
-    encoded = np.asarray([code[b] for b in seq], dtype=float)
-
-    # Local structural terms keep the 3D geometry tied to the 2D target.
-    twist = np.zeros(n, dtype=float)
-    roll = np.zeros(n, dtype=float)
-    slide = np.zeros(n, dtype=float)
-    if n > 1 and not dna.step_df.empty:
-        twist[1:] = dna.step_df["twist"].to_numpy(dtype=float)
-        roll[1:] = dna.step_df["roll"].to_numpy(dtype=float)
-        slide[1:] = dna.step_df["slide"].to_numpy(dtype=float)
-    twist_phase = np.cumsum(np.deg2rad(twist))
-    seq_angle = np.linspace(0.0, 2.0 * math.pi, n, endpoint=False)
-
-    # Base-specific scalar channels plus local helical phase/step geometry.
-    signals = np.column_stack([
-        encoded[:, 0],
-        encoded[:, 1],
-        encoded[:, 2],
-        0.08 * np.sin(twist_phase),
-        0.04 * roll,
-        0.04 * slide,
-    ])
-    # Robustly normalize each channel, then fuse into one sequence signal.
-    signal = np.zeros(n, dtype=float)
-    channel_weights = np.array([1.0, 0.8, 0.75, 0.6, 0.4, 0.4])
-    for j, w in enumerate(channel_weights):
-        ch = signals[:, j]
-        ch = ch - np.mean(ch)
-        scale = np.std(ch)
-        if scale > 1e-12:
-            signal += w * ch / scale
-    signal -= signal.mean()
-
-    # Resample onto a periodic angular grid while preserving gene order. This
-    # makes the angular spectrum reproducible for any sequence length.
-    angles = np.linspace(0.0, 2.0 * math.pi, 720, endpoint=False)
-    src = np.linspace(0.0, 2.0 * math.pi, n, endpoint=False)
-    periodic = np.interp(
-        angles,
-        np.r_[src, 2.0 * math.pi],
-        np.r_[signal, signal[0]],
-        period=2.0 * math.pi,
-    )
-    periodic = gaussian_filter(periodic, sigma=1.25, mode="wrap")
-    spectrum = np.fft.rfft(periodic)
-
-    # Select low angular harmonics that contain actual sequence information.
-    candidates = [(m, abs(spectrum[m])) for m in range(2, min(max_angular_mode, len(spectrum) - 1) + 1)]
-    candidates.sort(key=lambda item: item[1], reverse=True)
-    selected = candidates[: min(7, len(candidates))]
-    if not selected:
-        selected = [(2, 1.0)]
-    max_amp = max(a for _, a in selected) or 1.0
-
-    yy, xx = np.mgrid[-1.0:1.0:complex(size), -1.0:1.0:complex(size)]
-    r = np.hypot(xx, yy)
-    theta = np.arctan2(yy, xx)
-    field = np.zeros_like(r, dtype=float)
-
-    for m, amp in selected:
-        norm_amp = float(amp / max_amp)
-        phase = float(np.angle(spectrum[m]))
-        # Mix the first few circular membrane radial orders. The Bessel basis is
-        # the natural separation-of-variables basis for a circular membrane.
-        for radial_order in range(1, int(radial_modes) + 1):
-            alpha = float(jn_zeros(m, radial_order)[-1])
-            radial = jv(m, alpha * r)
-            taper = np.exp(-((r - radial_bias) / 0.52) ** 2) + 0.35 * np.exp(-((r - 0.20) / 0.18) ** 2)
-            radial *= taper
-            w = norm_amp / radial_order
-            field += w * radial * np.cos(m * theta + phase + 0.45 * radial_order)
-
-    # Convert standing-wave displacement into a soft nodal/sand target. The
-    # exponential keeps fine nodal contours visible without binary aliasing.
-    sigma = max(float(nodal_width), 0.01)
-    target = np.exp(-((np.abs(field) / sigma) ** 2))
-    # Soft circular aperture matching a finite resonator.
-    aperture = np.clip((1.0 - r) / 0.035, 0.0, 1.0)
-    target *= aperture
-    target -= target.min()
-    peak = target.max()
-    if peak > 0:
-        target /= peak
-    return target
 
 
 def fft_components(
@@ -557,77 +412,6 @@ def map_components(
             }
         )
     return pd.DataFrame(rows)
-
-
-def circular_membrane_mode_frequency(m: int, n: int, radius_m: float, wave_speed_m_s: float) -> float:
-    """Ideal circular-membrane Dirichlet eigenfrequency in Hz."""
-    if m < 0 or n < 1 or radius_m <= 0 or wave_speed_m_s <= 0:
-        return 0.0
-    zero = float(jn_zeros(int(m), int(n))[-1])
-    return float(wave_speed_m_s * zero / (2.0 * math.pi * radius_m))
-
-
-def rank_circular_membrane_modes(
-    target_image: np.ndarray,
-    radius_m: float,
-    wave_speed_m_s: float,
-    max_m: int = 12,
-    radial_orders: int = 4,
-    top_modes: int = 12,
-    target_type: str = "Nodal / sand",
-    fit_size: int = 160,
-    nodal_sigma: float = 0.16,
-) -> Tuple[pd.DataFrame, np.ndarray]:
-    """Rank circular membrane modes by similarity to a radial DNA cymatic target."""
-    if target_type not in {"DNA density", "Nodal / sand"}:
-        raise ValueError("Unknown target_type")
-    target = _resize_square(np.asarray(target_image, dtype=float), fit_size)
-    y = np.linspace(-radius_m, radius_m, fit_size)
-    x = np.linspace(-radius_m, radius_m, fit_size)
-    X, Y = np.meshgrid(x, y)
-    R = np.hypot(X, Y)
-    TH = np.arctan2(Y, X)
-
-    candidates = []
-    for m in range(0, int(max_m) + 1):
-        for n in range(1, int(radial_orders) + 1):
-            alpha = float(jn_zeros(m, n)[-1])
-            rho = R / max(radius_m, 1e-12)
-            phi = jv(m, alpha * rho) * np.cos(m * TH)
-            phi[R > radius_m] = 0.0
-            if target_type == "Nodal / sand":
-                field = np.exp(-((np.abs(phi) / max(float(nodal_sigma), 1e-4)) ** 2))
-            else:
-                field = (phi - phi.min()) / max(phi.max() - phi.min(), 1e-12)
-            score = _corr(target, field)
-            freq = circular_membrane_mode_frequency(m, n, radius_m, wave_speed_m_s)
-            candidates.append((score, m, n, freq, field))
-
-    candidates.sort(key=lambda item: item[0], reverse=True)
-    selected = candidates[: int(top_modes)]
-    positive = np.asarray([max(0.0, c[0]) for c in selected], dtype=float)
-    weights = positive / positive.sum() if positive.sum() > 0 else np.ones(len(selected)) / max(len(selected), 1)
-
-    recon = np.zeros_like(target)
-    rows = []
-    for rank, (weight, candidate) in enumerate(zip(weights, selected), start=1):
-        score, m, n, freq, field = candidate
-        recon += weight * field
-        rows.append({
-            "mode_rank": rank,
-            "m": m,
-            "n": n,
-            "frequency_Hz": float(freq),
-            "note": hz_to_note(freq),
-            "pattern_correlation": float(score),
-            "mixture_weight": float(weight),
-            "resonator": "ideal circular membrane",
-        })
-    recon -= recon.min()
-    peak = recon.max()
-    if peak > 0:
-        recon /= peak
-    return pd.DataFrame(rows), recon
 
 
 def square_plate_mode_frequency(
@@ -889,3 +673,346 @@ def image_metrics(reference: np.ndarray, measured: np.ndarray, threshold: float 
         "Dice overlap": dice,
         "IoU": iou,
     }
+
+# ---------- Atomic/circular-mode research pipeline ----------
+from scipy.special import jn_zeros, jv
+from scipy.ndimage import binary_erosion, distance_transform_edt
+
+
+def circular_membrane_mode_frequency(m: int, n: int, radius_m: float, wave_speed_m_s: float) -> float:
+    """Ideal circular, tension-dominated membrane eigenfrequency.
+
+    f_mn = c * alpha_mn / (2*pi*R), where alpha_mn is the n-th zero of J_m.
+    This is a membrane model, not a flexural plate model.
+    """
+    if int(m) < 0 or int(n) < 1 or radius_m <= 0 or wave_speed_m_s <= 0:
+        return 0.0
+    alpha = float(jn_zeros(int(m), int(n))[-1])
+    return float(wave_speed_m_s * alpha / (2.0 * math.pi * radius_m))
+
+
+def circular_membrane_mode_field(
+    m: int,
+    n: int,
+    size: int = 192,
+    nodal: bool = True,
+) -> np.ndarray:
+    """Return a normalized circular membrane displacement/nodal-density field."""
+    if not (0 <= int(m) <= 64 and 1 <= int(n) <= 32):
+        raise ValueError("Mode indices outside supported range")
+    size = int(size)
+    if size < 32:
+        raise ValueError("size must be >= 32")
+    x = np.linspace(-1.0, 1.0, size)
+    y = np.linspace(-1.0, 1.0, size)
+    X, Y = np.meshgrid(x, y)
+    r = np.hypot(X, Y)
+    theta = np.arctan2(Y, X)
+    alpha = float(jn_zeros(int(m), int(n))[-1])
+    phi = jv(int(m), alpha * r) * np.cos(int(m) * theta)
+    inside = r <= 1.0
+    if nodal:
+        # Sand tends to accumulate near displacement nodes; this is a soft node indicator.
+        scale = max(float(np.percentile(np.abs(phi[inside]), 75)), 1e-6)
+        field = np.exp(-((np.abs(phi) / (0.22 * scale)) ** 2))
+    else:
+        field = np.abs(phi)
+    field[~inside] = 0.0
+    field -= field.min()
+    peak = float(field.max())
+    if peak > 0:
+        field /= peak
+    return field
+
+
+def _resample_square(image: np.ndarray, size: int) -> np.ndarray:
+    arr = np.asarray(image, dtype=float)
+    if arr.ndim != 2:
+        raise ValueError("Expected a 2D image")
+    zoom_y = size / arr.shape[0]
+    zoom_x = size / arr.shape[1]
+    out = zoom(arr, (zoom_y, zoom_x), order=1)
+    out -= out.min()
+    peak = float(out.max())
+    if peak > 0:
+        out /= peak
+    return out
+
+
+def _normalized_projection_target(image: np.ndarray, nodal_target: bool = True, size: int = 192) -> np.ndarray:
+    target = _resample_square(image, size)
+    if nodal_target:
+        # Bright image means target nodal/sand accumulation; keep as density target.
+        pass
+    return target
+
+
+def rank_circular_membrane_modes(
+    target_image: np.ndarray,
+    radius_m: float,
+    wave_speed_m_s: float,
+    max_angular_mode: int = 20,
+    max_radial_mode: int = 12,
+    top_modes: int = 16,
+    target_type: str = "Nodal / sand",
+    fit_size: int = 128,
+) -> tuple[pd.DataFrame, np.ndarray]:
+    """Rank ideal circular membrane modes against a 2-D target.
+
+    The circular membrane approximation uses Bessel-function eigenfunctions.
+    For m>0, cosine/sine partners are frequency-degenerate, so the implementation
+    searches the orientation analytically by evaluating a vectorized orientation
+    grid. This preserves the frequency family while fitting its spatial phase.
+
+    This is a *candidate mode identification* model. It is not a calibrated model
+    of a metal plate; boundary conditions, stiffness, damping and actuator coupling
+    must be measured for physical prediction.
+    """
+    if target_type not in {"Nodal / sand", "Displacement magnitude"}:
+        raise ValueError("Unsupported target_type")
+    radius_m = float(radius_m); wave_speed_m_s = float(wave_speed_m_s)
+    if radius_m <= 0 or wave_speed_m_s <= 0:
+        raise ValueError("radius_m and wave_speed_m_s must be positive")
+    max_angular_mode = int(max_angular_mode)
+    max_radial_mode = int(max_radial_mode)
+    top_modes = int(top_modes)
+    fit_size = int(fit_size)
+    if not (0 <= max_angular_mode <= 64 and 1 <= max_radial_mode <= 32):
+        raise ValueError("Unsupported mode search limits")
+    if not (1 <= top_modes <= (max_angular_mode + 1) * max_radial_mode):
+        raise ValueError("Invalid top_modes")
+    if fit_size < 32:
+        raise ValueError("fit_size must be >= 32")
+
+    target = _resize_square(target_image, fit_size)
+    x = np.linspace(-1.0, 1.0, fit_size)
+    y = np.linspace(-1.0, 1.0, fit_size)
+    X, Y = np.meshgrid(x, y)
+    r = np.hypot(X, Y)
+    theta = np.arctan2(Y, X)
+    inside = r <= 1.0
+    target_inside = target[inside].astype(float)
+    target_inside -= target_inside.mean()
+    target_norm = float(np.linalg.norm(target_inside))
+
+    rows: list[dict] = []
+    fields: dict[tuple[int, int], np.ndarray] = {}
+
+    for m in range(max_angular_mode + 1):
+        zeros = jn_zeros(m, max_radial_mode)
+        radial_base = [jv(m, float(alpha) * r) for alpha in zeros]
+        for n in range(1, max_radial_mode + 1):
+            alpha = float(zeros[n - 1])
+            radial = np.asarray(radial_base[n - 1], dtype=float)
+            angles = np.array([0.0], dtype=float) if m == 0 else np.linspace(0.0, math.pi / m, 25)
+
+            # Vectorized orientation evaluation: (y, x, orientation).
+            disp = radial[:, :, None] * np.cos(m * theta[:, :, None] - angles[None, None, :])
+            if target_type == "Nodal / sand":
+                vals = np.abs(disp[:, :, :])
+                scale = max(float(np.percentile(vals[inside, :], 75)), 1e-6)
+                field_stack = np.exp(-((vals / (0.22 * scale)) ** 2))
+            else:
+                field_stack = np.abs(disp)
+            field_stack[~inside, :] = 0.0
+
+            flat = field_stack[inside, :].T
+            flat -= flat.mean(axis=1, keepdims=True)
+            norms = np.linalg.norm(flat, axis=1)
+            if target_norm > 1e-12:
+                scores = (flat @ target_inside) / np.maximum(norms * target_norm, 1e-12)
+            else:
+                scores = np.zeros(len(angles), dtype=float)
+            best_idx = int(np.argmax(scores))
+            best_score = float(scores[best_idx])
+            best_field = field_stack[:, :, best_idx].copy()
+            peak = float(best_field.max())
+            if peak > 0:
+                best_field /= peak
+            fields[(m, n)] = best_field
+
+            freq = circular_membrane_mode_frequency(m, n, radius_m, wave_speed_m_s)
+            rows.append({
+                "m": int(m),
+                "n": int(n),
+                "frequency_Hz": float(freq),
+                "angular_order": int(m),
+                "radial_order": int(n),
+                "bessel_zero": alpha,
+                "orientation_deg": float(math.degrees(float(angles[best_idx]))),
+                "pattern_correlation": best_score,
+                "mode_frequency_family": f"(m={m}, n={n})",
+            })
+
+    rows_df = pd.DataFrame(rows).sort_values("pattern_correlation", ascending=False).reset_index(drop=True)
+    selected = rows_df.head(top_modes).copy()
+    positive = np.maximum(selected["pattern_correlation"].to_numpy(float), 0.0)
+    weights = positive / positive.sum() if positive.sum() > 0 else np.ones(len(selected)) / len(selected)
+    recon = np.zeros((fit_size, fit_size), dtype=float)
+    for weight, (_, row) in zip(weights, selected.iterrows()):
+        recon += float(weight) * fields[(int(row["m"]), int(row["n"]))]
+    recon[~inside] = 0.0
+    if recon.max() > 0:
+        recon /= recon.max()
+
+    selected.insert(0, "mode_rank", np.arange(1, len(selected) + 1))
+    selected["mixture_weight"] = weights
+    selected["note"] = [hz_to_note(float(f)) for f in selected["frequency_Hz"]]
+    return selected, recon
+
+
+def polar_harmonic_spectrum(image: np.ndarray, max_m: int = 32, radial_bins: int = 128) -> pd.DataFrame:
+    """Compute rotation-sensitive angular harmonic energy from a square image."""
+    img = _resample_square(image, int(radial_bins) * 2)
+    size = img.shape[0]
+    y, x = np.indices(img.shape)
+    cx = (size - 1) / 2.0; cy = (size - 1) / 2.0
+    xx = x - cx; yy = y - cy
+    r = np.hypot(xx, yy)
+    theta = np.arctan2(yy, xx)
+    mask = r <= r.max()
+    records = []
+    for m in range(0, int(max_m) + 1):
+        coeff = np.sum(img[mask] * np.exp(-1j * m * theta[mask]))
+        records.append({"angular_order_m": m, "complex_amplitude": coeff, "energy": float(np.abs(coeff) ** 2)})
+    df = pd.DataFrame(records)
+    if not df.empty and float(df["energy"].sum()) > 0:
+        df["energy_fraction"] = df["energy"] / float(df["energy"].sum())
+    else:
+        df["energy_fraction"] = 0.0
+    return df
+
+
+def image_registration_metrics(reference: np.ndarray, measured: np.ndarray, threshold: float = 0.55) -> dict:
+    """Registration-aware image metrics plus boundary-distance error."""
+    ref = np.asarray(reference, dtype=float)
+    meas = np.asarray(measured, dtype=float)
+    if ref.ndim != 2 or meas.ndim != 2:
+        raise ValueError("Images must be grayscale 2-D arrays")
+    meas = _resample_square(meas, ref.shape[0])
+    ref -= ref.min(); meas -= meas.min()
+    if ref.max() > 0: ref /= ref.max()
+    if meas.max() > 0: meas /= meas.max()
+    # Search integer pixel translations around the center to compensate for camera framing.
+    best = None
+    lim = max(2, ref.shape[0] // 20)
+    for dy in range(-lim, lim + 1, max(1, lim // 10)):
+        for dx in range(-lim, lim + 1, max(1, lim // 10)):
+            shifted = np.zeros_like(meas)
+            y0 = max(0, dy); y1 = min(ref.shape[0], ref.shape[0] + dy)
+            x0 = max(0, dx); x1 = min(ref.shape[1], ref.shape[1] + dx)
+            sy0 = max(0, -dy); sy1 = sy0 + (y1 - y0)
+            sx0 = max(0, -dx); sx1 = sx0 + (x1 - x0)
+            shifted[y0:y1, x0:x1] = meas[sy0:sy1, sx0:sx1]
+            corr = _corr(ref, shifted)
+            if best is None or corr > best[0]:
+                best = (corr, dx, dy, shifted)
+    _, dx, dy, aligned = best
+    mse = float(np.mean((ref - aligned) ** 2))
+    rmse = math.sqrt(mse)
+    corr = _corr(ref, aligned)
+    ref_mask = ref >= float(threshold)
+    meas_mask = aligned >= float(threshold)
+    intersection = np.logical_and(ref_mask, meas_mask).sum()
+    union = np.logical_or(ref_mask, meas_mask).sum()
+    dice = float(2 * intersection / max(ref_mask.sum() + meas_mask.sum(), 1))
+    iou = float(intersection / max(union, 1))
+    ref_edge = ref_mask ^ binary_erosion(ref_mask)
+    meas_edge = meas_mask ^ binary_erosion(meas_mask)
+    if ref_edge.any() and meas_edge.any():
+        d_ref = distance_transform_edt(~ref_edge)
+        d_meas = distance_transform_edt(~meas_edge)
+        hd95 = float(max(np.percentile(d_meas[ref_edge], 95), np.percentile(d_ref[meas_edge], 95)))
+    else:
+        hd95 = float("nan")
+    ref_h = polar_harmonic_spectrum(ref, max_m=24)
+    meas_h = polar_harmonic_spectrum(aligned, max_m=24)
+    harmonic_corr = _corr(ref_h["energy_fraction"].to_numpy(), meas_h["energy_fraction"].to_numpy())
+    return {
+        "RMSE": rmse,
+        "Pearson spatial correlation": corr,
+        "Dice overlap": dice,
+        "IoU": iou,
+        "95th-percentile nodal boundary distance (pixels)": hd95,
+        "registration_dx_pixels": int(dx),
+        "registration_dy_pixels": int(dy),
+        "angular-harmonic correlation": float(harmonic_corr),
+        "aligned_image": aligned,
+    }
+
+
+def create_physical_drive_audio(
+    mode_table: pd.DataFrame,
+    duration_per_mode_s: float = 3.0,
+    sample_rate: int = 44_100,
+    amplitude_column: str = "mixture_weight",
+    use_exact_frequencies: bool = True,
+) -> tuple[np.ndarray, list[dict]]:
+    """Generate a one-mode-at-a-time physical-drive WAV.
+
+    Frequencies are not quantized. This output is intended for a calibrated
+    resonator experiment, not for conventional musical listening.
+    """
+    if mode_table.empty:
+        raise ValueError("No modes available")
+    sr = int(sample_rate)
+    d = float(duration_per_mode_s)
+    total = int(round(len(mode_table) * d * sr))
+    out = np.zeros(total, dtype=np.float64)
+    events: list[dict] = []
+    for i, row in mode_table.iterrows():
+        f = float(row["frequency_Hz"] if use_exact_frequencies else row.get("note_Hz", row["frequency_Hz"]))
+        amp = float(row.get(amplitude_column, 1.0))
+        start = int(round(i * d * sr)); n = min(int(round(d * sr)), total - start)
+        if n <= 0 or f <= 0 or f >= sr / 2:
+            continue
+        t = np.arange(n, dtype=float) / sr
+        attack = min(0.1, d / 5.0)
+        release = min(0.15, d / 5.0)
+        env = np.minimum(1.0, t / max(attack, 1e-6)) * np.minimum(1.0, (d - t) / max(release, 1e-6))
+        out[start:start+n] += amp * env * np.sin(2.0 * math.pi * f * t)
+        events.append({"index": int(i + 1), "start_s": float(i * d), "duration_s": d, "frequency_Hz": f, "amplitude": amp})
+    peak = float(np.max(np.abs(out)))
+    if peak > 0: out = 0.95 * out / peak
+    return out.astype(np.float32), events
+
+
+def create_musical_audio_from_modes(
+    mode_table: pd.DataFrame,
+    duration_s: float = 24.0,
+    sample_rate: int = 44_100,
+    tempo_bpm: float = 96.0,
+    quantization: str = "chromatic",
+    harmonic_order: int = 3,
+) -> tuple[np.ndarray, list[dict]]:
+    """Map physical mode frequencies to musical pitches while retaining order/weights."""
+    if mode_table.empty:
+        raise ValueError("No modes available")
+    sr = int(sample_rate); total = int(round(float(duration_s) * sr))
+    beat = 60.0 / max(float(tempo_bpm), 1.0)
+    note_len = beat
+    audio = np.zeros(total, dtype=float)
+    events: list[dict] = []
+    weights = np.asarray(mode_table.get("mixture_weight", np.ones(len(mode_table))), dtype=float)
+    weights = weights / max(float(weights.max()), 1e-9)
+    for idx, (_, row) in enumerate(mode_table.iterrows()):
+        physical = float(row["frequency_Hz"])
+        musical = physical
+        if quantization == "chromatic":
+            musical, note = quantize_frequency(physical, "chromatic")
+        else:
+            note = hz_to_note(musical)
+        start = int(round((idx * note_len) * sr)) % total
+        n = min(int(round(note_len * 0.9 * sr)), total - start)
+        if n <= 0 or musical <= 0 or musical >= sr / 2: continue
+        t = np.arange(n, dtype=float) / sr
+        env = np.minimum(1.0, t / 0.025) * np.minimum(1.0, (note_len * 0.9 - t) / 0.08)
+        signal = np.sin(2 * math.pi * musical * t)
+        for h in range(2, max(1, int(harmonic_order)) + 1):
+            signal += (1.0 / h) * np.sin(2 * math.pi * musical * h * t)
+        signal /= sum(1.0 / h for h in range(1, max(1, int(harmonic_order)) + 1))
+        audio[start:start+n] += (0.15 + 0.32 * weights[idx]) * env * signal
+        events.append({"mode_index": idx + 1, "physical_frequency_Hz": physical, "musical_frequency_Hz": float(musical), "note": note})
+    peak = float(np.max(np.abs(audio)))
+    if peak > 0: audio = 0.92 * audio / peak
+    return audio.astype(np.float32), events
