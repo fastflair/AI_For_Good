@@ -270,6 +270,8 @@ def run_pipeline(
     calibration_csv, calibration_tolerance_hz, use_calibrated_frequency,
     target_type, physical_duration_per_mode_s, physical_mix_duration_s, musical_quantization, musical_duration_s, tempo_bpm,
     musical_arrangement, musical_beats_per_note, musical_repeat_to_target, musical_interval_compression,
+    musical_combination_count, musical_min_combination_size, musical_max_combination_size, musical_combination_seed,
+    musical_include_all_tones, musical_combination_render, musical_combination_beats,
 ):
     try:
         seq = clean_sequence(sequence)
@@ -345,6 +347,13 @@ def run_pipeline(
             quantization=musical_quantization, arrangement=musical_arrangement,
             repeat_to_target=bool(musical_repeat_to_target), beats_per_note=float(musical_beats_per_note),
             interval_compression=float(musical_interval_compression),
+            combination_count=int(musical_combination_count),
+            min_combination_size=int(musical_min_combination_size),
+            max_combination_size=int(musical_max_combination_size),
+            combination_seed=int(musical_combination_seed),
+            include_all_tones=bool(musical_include_all_tones),
+            combination_render=str(musical_combination_render),
+            combination_beats=float(musical_combination_beats),
         )
 
         sand_prediction = observable_to_sand_artwork(mode_recon, mode=target_type)
@@ -368,6 +377,7 @@ def run_pipeline(
         physical_wav = run_dir / "physical_drive_all_candidates_sequential.wav"
         best_mode_wav = run_dir / "physical_drive_best_mode.wav"
         musical_wav = run_dir / "dna_musical_sonification.wav"
+        musical_melody_csv = run_dir / "musical_combination_melody.csv"
         mode_csv = run_dir / "circular_modes.csv"
         harmonic_csv = run_dir / "polar_harmonics.csv"
         spectrum_csv = run_dir / "spatial_frequency_components.csv"
@@ -378,6 +388,7 @@ def run_pipeline(
         sf.write(physical_wav, physical_audio, 44_100, subtype="PCM_16")
         sf.write(best_mode_wav, best_mode_audio, 44_100, subtype="PCM_16")
         sf.write(musical_wav, musical_audio, 44_100, subtype="PCM_16")
+        pd.DataFrame(musical_events).to_csv(musical_melody_csv, index=False)
         modes.to_csv(mode_csv, index=False)
         harmonics.drop(columns=["complex_amplitude"], errors="ignore").to_csv(harmonic_csv, index=False)
         pd.DataFrame(spectrum_components).to_csv(spectrum_csv, index=False)
@@ -399,7 +410,7 @@ def run_pipeline(
         plt.close(fig)
 
         payload = {
-            "software": {"version": "0.10", "application": "DNA-Cymatics"},
+            "software": {"version": "0.13", "application": "DNA-Cymatics"},
             "sequence": {"length_bp": len(seq), "sha256": __import__('hashlib').sha256(seq.encode()).hexdigest(), "model": dna_model},
             "structure": {
                 "source": atomic.source, "dna_form": atomic.dna_form, "n_atoms": atomic.n_atoms,
@@ -446,11 +457,22 @@ def run_pipeline(
             "physical_events": physical_events,
             "best_mode_events": best_mode_events,
             "musical_events": musical_events,
+            "musical_generator": {
+                "arrangement": str(musical_arrangement),
+                "combination_count": int(musical_combination_count),
+                "min_combination_size": int(musical_min_combination_size),
+                "max_combination_size": int(musical_max_combination_size),
+                "seed": int(musical_combination_seed),
+                "include_all_tones": bool(musical_include_all_tones),
+                "combination_render": str(musical_combination_render),
+                "combination_beats": float(musical_combination_beats),
+                "melody_rule": "Every source tone once -> random subsets -> optional all-tones synthesis event.",
+            },
             "summary": summary,
         }
         json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         with zipfile.ZipFile(bundle_path, "w", zipfile.ZIP_DEFLATED) as z:
-            for p in [literal_png, target_png, resonator_target_png, spectrum_png, modes_png, sand_png, fit_png, atomic_pdb, physical_mix_wav, physical_wav, best_mode_wav, musical_wav, mode_csv, harmonic_csv, spectrum_csv, json_path]:
+            for p in [literal_png, target_png, resonator_target_png, spectrum_png, modes_png, sand_png, fit_png, atomic_pdb, physical_mix_wav, physical_wav, best_mode_wav, musical_wav, musical_melody_csv, mode_csv, harmonic_csv, spectrum_csv, json_path]:
                 z.write(p, p.name)
 
         note_lines = [
@@ -467,7 +489,7 @@ def run_pipeline(
         note_lines += [
             "",
             "**Physical-drive interpretation:** the **MODE MIXTURE WAV** is the primary inverse-model drive. It is a time-averaged multimode approximation, not a guarantee of one static Chladni figure. "
-            "The predicted sand artwork is derived from the fitted observable. The sequential WAV is for resonance isolation/calibration, the BEST SINGLE MODE WAV isolates the strongest single-mode match, and the musical WAV is a separate creative sonification. When motif repetition is OFF, the musical WAV is automatically truncated to its actual generated event length (no silent tail); when ON, the motif repeats to the requested duration.",
+            "The predicted sand artwork is derived from the fitted observable. The sequential WAV is for resonance isolation/calibration, the BEST SINGLE MODE WAV isolates the strongest single-mode match, and the musical WAV is a separate creative sonification. The DNA Combination Melody arrangement includes each source tone once, then random tone subsets, then an optional all-tone synthesis event. When motif repetition is OFF, the musical WAV is automatically truncated to its actual generated event length (no silent tail); when ON, the complete combinatorial grammar repeats to the requested duration."
         ]
 
         return (
@@ -480,6 +502,8 @@ def run_pipeline(
             _image_plot(sand_prediction, "Predicted cymatics sand/nodal artwork proxy", cmap="magma"),
             _fit_plot(target, mode_recon),
             modes,
+            pd.DataFrame(musical_events),
+            str(musical_melody_csv),
             "\n\n".join(note_lines),
             str(physical_mix_wav),
             str(physical_wav),
@@ -602,8 +626,15 @@ The canonical sequence is **zebrafish hoxb1a-201**, 1,507 nt. The default sequen
                 calibration_tolerance_hz = gr.Slider(10, 1000, value=250, step=10, label="Calibration frequency matching tolerance (Hz)")
                 use_calibrated_frequency = gr.Checkbox(value=True, label="Use measured resonance frequencies when calibration CSV is supplied")
                 musical_quantization = gr.Radio(["none", "chromatic"], value="chromatic", label="Musical pitch quantization")
-                musical_arrangement = gr.Radio(["Salience contour", "Frequency ascending", "Angular symmetry"], value="Salience contour", label="Musical note order", info="Salience contour uses the strongest DNA-derived spatial modes first, then an ascending/descending frequency contour.")
-                musical_beats_per_note = gr.Slider(0.25, 2.0, value=0.75, step=0.25, label="Beats per note")
+                musical_arrangement = gr.Radio(["DNA Combination Melody", "Salience contour", "Frequency ascending", "Angular symmetry"], value="DNA Combination Melody", label="Musical note arrangement", info="DNA Combination Melody guarantees every source tone, explores random combinations, and ends with an optional all-tone synthesis event.")
+                musical_combination_count = gr.Slider(0, 48, value=12, step=1, label="Random combination events")
+                musical_min_combination_size = gr.Slider(2, 8, value=2, step=1, label="Minimum combination size")
+                musical_max_combination_size = gr.Slider(2, 20, value=8, step=1, label="Maximum combination size", info="Clamped automatically to one less than the number of available source tones.")
+                musical_combination_seed = gr.Number(value=0, precision=0, label="Combination seed", info="Same seed + same tone count/order = same combinatorial melody. Change it to create another melody.")
+                musical_include_all_tones = gr.Checkbox(value=True, label="Finish with combination of ALL tones")
+                musical_combination_render = gr.Radio(["Arpeggio + chord", "Arpeggio", "Chord"], value="Arpeggio + chord", label="Combination rendering", info="Arpeggio + chord exposes each member melodically, then confirms the combination harmonically.")
+                musical_combination_beats = gr.Slider(0.5, 4.0, value=1.5, step=0.25, label="Beats per combination")
+                musical_beats_per_note = gr.Slider(0.25, 2.0, value=0.75, step=0.25, label="Beats per individual tone")
                 musical_interval_compression = gr.Slider(0.45, 1.0, value=0.70, step=0.05, label="Musical interval compression", info="1.0 preserves physical frequency ratios; lower values compress extreme jumps into a more practical melodic range.")
                 musical_repeat_to_target = gr.Checkbox(value=False, label="Repeat motif to target duration", info="OFF: WAV is automatically truncated to actual generated audio. ON: repeat the motif until the requested duration, then trim exactly.")
                 physical_duration_per_mode_s = gr.Slider(0.5, 10, value=2.0, step=0.5, label="Calibration seconds per mode")
@@ -626,6 +657,8 @@ The canonical sequence is **zebrafish hoxb1a-201**, 1,507 nt. The default sequen
         out_fit = gr.Plot(label="DNA target vs modal-mixture fit")
         out_spectrum = gr.Plot(label="Spatial Fourier spectrum")
         out_table = gr.Dataframe(label="Candidate resonator modes", wrap=True)
+        out_melody = gr.Dataframe(label="Generated combinatorial melody plan", wrap=True, interactive=False)
+        out_melody_file = gr.File(label="Download combinatorial melody CSV")
         out_summary = gr.Markdown()
         with gr.Row():
             physical_mix_audio = gr.Audio(label="PRIMARY physical drive — simultaneous fitted mode mixture (exact Hz)", type="filepath")
@@ -642,8 +675,9 @@ The canonical sequence is **zebrafish hoxb1a-201**, 1,507 nt. The default sequen
                     target_transform, target_smoothing_px, resonator_model, membrane_radius_mm, membrane_speed, plate_thickness_mm, plate_material,
                     max_angular_mode, max_radial_mode, top_modes,
                     candidate_pool, node_width, actuator_r_fraction, actuator_theta_deg, inverse_regularization, calibration_csv, calibration_tolerance_hz, use_calibrated_frequency,
-                    target_type, physical_duration_per_mode_s, physical_mix_duration_s, musical_quantization, musical_duration_s, tempo_bpm, musical_arrangement, musical_beats_per_note, musical_repeat_to_target, musical_interval_compression],
-            outputs=[out_3d, out_projection_literal, out_projection_target, out_projection_resonator_target, out_spectrum, out_recon, out_sand, out_fit, out_table, out_summary,
+                    target_type, physical_duration_per_mode_s, physical_mix_duration_s, musical_quantization, musical_duration_s, tempo_bpm, musical_arrangement, musical_beats_per_note, musical_repeat_to_target, musical_interval_compression,
+                    musical_combination_count, musical_min_combination_size, musical_max_combination_size, musical_combination_seed, musical_include_all_tones, musical_combination_render, musical_combination_beats],
+            outputs=[out_3d, out_projection_literal, out_projection_target, out_projection_resonator_target, out_spectrum, out_recon, out_sand, out_fit, out_table, out_melody, out_melody_file, out_summary,
                      physical_mix_audio, physical_audio, best_mode_audio, musical_audio, out_bundle, reference_state],
         )
 

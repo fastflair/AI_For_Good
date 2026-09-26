@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-from typing import Dict, List, Tuple
+import random
+from typing import Dict, List, Tuple, Optional, Sequence
 from functools import lru_cache
 
 import numpy as np
@@ -1441,6 +1442,137 @@ def create_simultaneous_physical_drive_audio(
 
 
 
+def generate_combination_melody_plan(
+    n_tones: int,
+    tone_order: Optional[Sequence[int]] = None,
+    combination_count: Optional[int] = None,
+    min_combination_size: int = 2,
+    max_combination_size: Optional[int] = None,
+    seed: int = 0,
+    include_all_tones: bool = True,
+) -> list[dict]:
+    """Build a reproducible combinatorial melody plan from *tone indices* only.
+
+    The algorithm deliberately does not require the actual frequencies.  It operates
+    on the known number of tones and a canonical order, then leaves pitch assignment
+    to :func:`create_musical_audio_from_modes`.
+
+    Structure:
+      1. Every distinct tone is presented exactly once.
+      2. A deterministic pseudo-random development section adds subset combinations
+         with sizes spanning ``min_combination_size..max_combination_size``.
+      3. An optional final ALL-TONES event synthesizes the complete set.
+
+    Each combination is stored as an ordered tuple of source tone indices.  The random
+    generator is seeded so identical inputs reproduce the same melody.  Changing the
+    seed produces a different valid combinatorial melody without changing the tone set.
+    """
+    n = int(n_tones)
+    if n < 1:
+        raise ValueError("n_tones must be >= 1")
+
+    if tone_order is None:
+        order = list(range(n))
+    else:
+        order = [int(i) for i in tone_order]
+        if sorted(order) != list(range(n)):
+            raise ValueError("tone_order must be a permutation of 0..n_tones-1")
+
+    if n == 1:
+        plan = [{"section": "declaration", "event_type": "single", "tone_indices": [order[0]], "event_number": 1}]
+        if include_all_tones:
+            plan.append({"section": "synthesis", "event_type": "all", "tone_indices": [order[0]], "event_number": 2})
+        return plan
+    if n == 2:
+        # There is no proper intermediate subset size: every 2-tone subset is already
+        # the ALL-tones set. Keep the grammar well-defined rather than raising.
+        plan = [
+            {"section": "declaration", "event_type": "single", "tone_indices": [int(order[0])], "event_number": 1},
+            {"section": "declaration", "event_type": "single", "tone_indices": [int(order[1])], "event_number": 2},
+        ]
+        if include_all_tones:
+            plan.append({"section": "synthesis", "event_type": "all", "tone_indices": [int(i) for i in order], "event_number": 3})
+        return plan
+
+    kmin = max(2, int(min_combination_size))
+    kmax = n - 1 if max_combination_size is None else min(int(max_combination_size), n - 1)
+    if kmin > kmax:
+        raise ValueError("Combination size range is empty; choose min size < n_tones")
+
+    count = (2 * n if combination_count is None else int(combination_count))
+    if count < 0:
+        raise ValueError("combination_count must be >= 0")
+
+    rng = random.Random(int(seed))
+    position = {idx: pos for pos, idx in enumerate(order)}
+
+    plan: list[dict] = []
+    event_no = 1
+    # Section 1: every tone exactly once. This guarantees coverage independent of
+    # subsequent random combinations and preserves the requested global order.
+    for idx in order:
+        plan.append({
+            "section": "declaration",
+            "event_type": "single",
+            "tone_indices": [int(idx)],
+            "event_number": event_no,
+        })
+        event_no += 1
+
+    # Section 2: randomly selected combinations. We deliberately cycle combination
+    # sizes so the melody contains pairs, triads, and larger groupings rather than
+    # clustering at one subset size.
+    seen: set[tuple[int, ...]] = set()
+    for j in range(count):
+        size = kmin + (j % (kmax - kmin + 1))
+        chosen = tuple(sorted(rng.sample(range(n), size), key=lambda i: position[i]))
+        if not chosen:
+            continue
+        # Avoid an identical subset unless all unique subsets of this size are exhausted.
+        attempts = 0
+        while chosen in seen and attempts < 12:
+            chosen = tuple(sorted(rng.sample(range(n), size), key=lambda i: position[i]))
+            attempts += 1
+        seen.add(chosen)
+        # Randomly vary the internal contour while retaining the global tone identity.
+        members = list(chosen)
+        if len(members) > 2:
+            roll = rng.randrange(len(members))
+            members = members[roll:] + members[:roll]
+        if rng.random() < 0.35:
+            members.reverse()
+        plan.append({
+            "section": "combinatorial",
+            "event_type": "combination",
+            "tone_indices": [int(i) for i in members],
+            "event_number": event_no,
+        })
+        event_no += 1
+
+    # Section 3: one explicit synthesis event containing every tone.
+    if include_all_tones:
+        plan.append({
+            "section": "synthesis",
+            "event_type": "all",
+            "tone_indices": [int(i) for i in order],
+            "event_number": event_no,
+        })
+
+    return plan
+
+
+def _musical_frequency_mapping(physical: np.ndarray, interval_compression: float, center_hz: float = 220.0) -> np.ndarray:
+    """Map physical resonances to a musical register using one global transform."""
+    gmean = float(np.exp(np.mean(np.log(np.maximum(physical, 1e-9)))))
+    log_ratio = np.log2(np.maximum(physical, 1e-9) / max(gmean, 1e-9))
+    musical = center_hz * np.power(2.0, interval_compression * log_ratio)
+    while float(np.median(musical)) < 110.0:
+        musical *= 2.0
+    while float(np.median(musical)) > 880.0:
+        musical /= 2.0
+    return musical
+
+
 def create_musical_audio_from_modes(
     mode_table: pd.DataFrame,
     duration_s: float = 24.0,
@@ -1448,31 +1580,38 @@ def create_musical_audio_from_modes(
     tempo_bpm: float = 96.0,
     quantization: str = "chromatic",
     harmonic_order: int = 4,
-    arrangement: str = "Salience contour",
+    arrangement: str = "DNA Combination Melody",
     repeat_to_target: bool = False,
     beats_per_note: float = 0.75,
     phrase_gap_beats: float = 0.25,
     interval_compression: float = 0.70,
+    combination_count: int = 12,
+    min_combination_size: int = 2,
+    max_combination_size: Optional[int] = None,
+    combination_seed: int = 0,
+    include_all_tones: bool = True,
+    combination_render: str = "Arpeggio + chord",
+    combination_beats: float = 1.5,
 ) -> tuple[np.ndarray, list[dict]]:
-    """Create a listening/Suno-oriented musical sonification.
+    """Create a listening/Suno-oriented DNA combinatorial melody.
 
-    Improvements over the original renderer:
-    * Never pads the WAV with silent trailing samples.  With ``repeat_to_target=False``
-      the file is exactly the length of the generated musical sequence (capped by
-      ``duration_s``).
-    * Uses one global frequency scale factor so physical frequency ratios are preserved
-      exactly before optional chromatic quantization.  The old implementation folded
-      each note independently by octave, which distorted interval relationships.
-    * Orders modes by spatial salience and uses an ascending/descending contour so the
-      strongest DNA-derived modes are heard as a coherent motif rather than arbitrary
-      dataframe order.
-    * Stronger modes receive slightly longer/louder notes.
-    * Optional phrase repetition can intentionally fill the requested duration for a
-      longer Suno input; otherwise the output stays at its natural generated length.
-    * Adds a small phrase gap while keeping phase-continuous note envelopes within notes.
+    The new ``DNA Combination Melody`` arrangement is intentionally defined on the
+    *identity and count of source tones*, not on their numeric values. It therefore
+    works even when the frequencies are only known after the resonator inverse solve.
 
-    This is a creative sonification, NOT the physical cymatics drive waveform. The
-    exact unquantized physical frequencies remain in the separate physical-drive WAVs.
+    Melody grammar:
+
+        [T1 T2 ... TN]
+        -> [random subsets of T1..TN]
+        -> [T1 T2 ... TN] (all-tone synthesis)
+
+    Every tone appears once as a singleton. Random combination events then explore
+    different subset sizes. The final all-tone event explicitly combines the complete
+    source set. Combination events are rendered as an arpeggio followed by a short
+    simultaneous chord by default, so a music model can perceive both the individual
+    identities and their harmonic combination.
+
+    This is a creative sonification, NOT the physical cymatics drive waveform.
     """
     if mode_table.empty:
         raise ValueError("No modes available")
@@ -1481,13 +1620,14 @@ def create_musical_audio_from_modes(
     if target_duration <= 0 or sr < 8_000:
         raise ValueError("duration_s must be positive and sample_rate must be >= 8000")
     beat = 60.0 / max(float(tempo_bpm), 1.0)
-    note_beats = max(float(beats_per_note), 0.25)
+    single_beats = max(float(beats_per_note), 0.25)
+    combo_beats = max(float(combination_beats), single_beats)
     interval_compression = float(interval_compression)
     if not (0.25 <= interval_compression <= 1.0):
         raise ValueError("interval_compression must be between 0.25 and 1.0")
     gap_beats = max(float(phrase_gap_beats), 0.0)
-    note_len = beat * note_beats
-    slot_len = note_len + beat * gap_beats
+    if combination_render not in {"Arpeggio + chord", "Chord", "Arpeggio"}:
+        raise ValueError("Unknown combination_render")
 
     df = mode_table.copy().reset_index(drop=True)
     physical = pd.to_numeric(df["frequency_Hz"], errors="coerce").to_numpy(float)
@@ -1499,8 +1639,6 @@ def create_musical_audio_from_modes(
 
     weights = pd.to_numeric(df.get("mixture_weight", pd.Series(np.ones(len(df)))), errors="coerce").fillna(0.0).to_numpy(float)
     corr = pd.to_numeric(df.get("single_mode_correlation", pd.Series(np.zeros(len(df)))), errors="coerce").fillna(0.0).to_numpy(float)
-    # Spatial salience is intentionally positive and bounded. It combines how strongly
-    # the mode participates in the inverse fit with its direct image match.
     w = np.maximum(weights, 0.0)
     if w.max() > 0:
         w = w / w.max()
@@ -1508,124 +1646,185 @@ def create_musical_audio_from_modes(
     salience = 0.65 * w + 0.35 * c
     df["_salience"] = salience
 
-    if arrangement == "Frequency ascending":
-        base_order = np.argsort(physical, kind="stable")
-        motif = list(base_order)
+    m = pd.to_numeric(df.get("m", pd.Series(np.zeros(len(df)))), errors="coerce").fillna(0).to_numpy(int)
+    n = pd.to_numeric(df.get("n", pd.Series(np.ones(len(df)))), errors="coerce").fillna(1).to_numpy(int)
+    if arrangement in {"Frequency ascending", "Frequency contour"}:
+        tone_order = list(np.argsort(physical, kind="stable"))
+        arrangement_label = arrangement
     elif arrangement == "Angular symmetry":
-        m = pd.to_numeric(df.get("m", pd.Series(np.zeros(len(df)))), errors="coerce").fillna(0).to_numpy(int)
-        n = pd.to_numeric(df.get("n", pd.Series(np.ones(len(df)))), errors="coerce").fillna(1).to_numpy(int)
-        motif = list(np.lexsort((n, physical, m)))
-    elif arrangement == "Salience contour":
-        # Start from the most important spatial modes, then return through their
-        # frequency ordering. This creates a recognizable A-B-A' contour while retaining
-        # the DNA-derived mode set and relative salience.
-        sal_order = list(np.argsort(-salience, kind="stable"))
-        top = sal_order[: min(len(sal_order), 6)]
-        low_high = list(np.argsort(physical, kind="stable"))
-        high_low = list(reversed(low_high))
-        # Keep unique modes while favoring salience early in the phrase.
-        motif = []
-        for idx in top + low_high + high_low:
-            if idx not in motif:
-                motif.append(int(idx))
-        # Ensure every mode is heard at least once.
-        for idx in sal_order:
-            if idx not in motif:
-                motif.append(int(idx))
+        tone_order = list(np.lexsort((n, physical, m)))
+        arrangement_label = arrangement
     else:
-        raise ValueError("Unknown musical arrangement")
+        # Default and DNA Combination Melody use spatial importance as the canonical
+        # source-tone order. The random subset generator itself uses only indices/count.
+        tone_order = list(np.argsort(-salience, kind="stable"))
+        arrangement_label = "DNA Combination Melody"
 
-    # Preserve physical interval ratios with one global scale, then shift the entire
-    # collection by octaves as a group to fit a practical musical register. This is
-    # materially better than octave-folding each note independently.
-    gmean = float(np.exp(np.mean(np.log(np.maximum(physical, 1e-9)))))
-    musical_center = 220.0  # A3 reference region
-    # Work in log-frequency. Compression below 1.0 makes very wide resonator spectra
-    # musically usable while preserving ordering and smooth interval relationships.
-    log_ratio = np.log2(np.maximum(physical, 1e-9) / max(gmean, 1e-9))
-    musical_raw = musical_center * np.power(2.0, interval_compression * log_ratio)
-    # One common octave shift keeps the collection in a useful register without changing
-    # the intervals relative to one another.
-    while float(np.median(musical_raw)) < 110.0:
-        musical_raw *= 2.0
-    while float(np.median(musical_raw)) > 880.0:
-        musical_raw /= 2.0
+    if arrangement_label == "DNA Combination Melody":
+        plan = generate_combination_melody_plan(
+            len(df), tone_order=tone_order, combination_count=int(combination_count),
+            min_combination_size=int(min_combination_size), max_combination_size=max_combination_size,
+            seed=int(combination_seed), include_all_tones=bool(include_all_tones),
+        )
+    else:
+        # Preserve the previous simple arrangements for comparison.
+        plan = [
+            {"section": "linear", "event_type": "single", "tone_indices": [int(i)], "event_number": k + 1}
+            for k, i in enumerate(tone_order)
+        ]
 
-    # Build a finite motif, then either render once (natural-length mode) or repeat it
-    # enough times to reach the user's requested target duration and trim exactly.
-    motif_slots = len(motif) * slot_len + beat * gap_beats
-    if motif_slots <= 0:
-        raise ValueError("Generated musical motif has zero duration")
+    musical_raw = _musical_frequency_mapping(physical, interval_compression)
+    H = max(1, int(harmonic_order))
+    harmonic_den = sum(1.0 / (h ** 1.15) for h in range(1, H + 1))
+
+    # Estimate natural motif duration so the no-repeat renderer never manufactures a
+    # silent tail. Combination events consume more musical time because they contain a
+    # richer amount of information.
+    natural_beats = 0.0
+    for p in plan:
+        natural_beats += combo_beats if p["event_type"] in {"combination", "all"} else single_beats
+        natural_beats += gap_beats
+    natural_duration = max(beat, natural_beats * beat)
     if repeat_to_target:
-        repetitions = max(1, int(math.ceil(target_duration / motif_slots)))
-        sequence = (motif * repetitions)
         render_duration = target_duration
     else:
-        sequence = motif
-        render_duration = min(target_duration, motif_slots)
+        render_duration = min(target_duration, natural_duration)
 
     total = max(1, int(round(render_duration * sr)))
     audio = np.zeros(total, dtype=float)
     events: list[dict] = []
-    H = max(1, int(harmonic_order))
-    harmonic_norm = sum(1.0 / h for h in range(1, H + 1))
-    t_cursor = 0.0
+    cursor_s = 0.0
 
-    for event_idx, idx in enumerate(sequence):
-        f_phys = float(physical[idx])
-        f_mus = float(musical_raw[idx])
-        if quantization == "chromatic":
-            f_render, note = quantize_frequency(f_mus, "chromatic")
-        elif quantization == "none":
-            f_render, note = f_mus, hz_to_note(f_mus)
-        else:
-            raise ValueError("quantization must be 'chromatic' or 'none'.")
-        if not (0.0 < f_render < sr / 2.0):
-            continue
-
-        start = int(round(t_cursor * sr))
+    def render_tone(start_s: float, duration: float, freq: float, amp: float, phase: float = 0.0):
+        start = int(round(start_s * sr))
         if start >= total:
-            break
-        n = min(int(round(note_len * sr)), total - start)
-        if n <= 0:
-            break
-        t = np.arange(n, dtype=float) / sr
-        release = min(0.16, note_len * 0.28)
-        attack = min(0.025, note_len * 0.12)
-        env = _fade_envelope(n, sr, attack_s=attack, release_s=release)
-        signal = np.zeros(n, dtype=float)
+            return
+        count = min(int(round(duration * sr)), total - start)
+        if count <= 0:
+            return
+        t = np.arange(count, dtype=float) / sr
+        env = _fade_envelope(count, sr, attack_s=min(0.025, duration * 0.12), release_s=min(0.12, duration * 0.25))
+        signal = np.zeros(count, dtype=float)
         for h in range(1, H + 1):
-            # Mild harmonic rolloff plus a tiny inharmonicity term keeps the sound richer
-            # without making the note spectrum dominate the frequency identity.
-            partial = f_render * h * (1.0 + 0.0006 * (h - 1) ** 2)
+            partial = freq * h * (1.0 + 0.0006 * (h - 1) ** 2)
             if partial >= sr / 2.0:
                 break
-            signal += (1.0 / (h ** 1.15)) * np.sin(2.0 * math.pi * partial * t)
-        normalizer = sum(1.0 / (h ** 1.15) for h in range(1, H + 1))
-        signal /= max(normalizer, 1e-9)
+            signal += (1.0 / (h ** 1.15)) * np.sin(2.0 * math.pi * partial * t + phase * h)
+        signal /= max(harmonic_den, 1e-9)
+        audio[start:start + count] += amp * env * signal
 
-        sal = float(salience[idx])
-        # Emphasize spatially important modes without making the loudness overpowering.
-        amp = 0.12 + 0.28 * sal
-        audio[start:start + n] += amp * env * signal
-        events.append({
-            "event_index": event_idx + 1,
-            "mode_index": int(idx + 1),
-            "start_s": float(start / sr),
-            "duration_s": float(n / sr),
-            "physical_frequency_Hz": f_phys,
-            "musical_frequency_Hz": f_render,
-            "note": note,
-            "relative_mode_weight": float(max(w[idx], 0.0)),
-            "spatial_salience": sal,
-            "arrangement": arrangement,
-            "interval_compression": float(interval_compression),
-        })
-        t_cursor += slot_len
+    def render_chord(start_s: float, duration: float, tone_indices: list[int], base_amp: float):
+        k = max(len(tone_indices), 1)
+        for j, idx in enumerate(tone_indices):
+            # Small deterministic phase offsets prevent completely identical wave starts
+            # in a large chord while remaining reproducible.
+            phase = 2.0 * math.pi * ((j * 0.173) % 1.0)
+            render_tone(start_s, duration, float(musical_raw[idx]), base_amp / math.sqrt(k), phase)
 
-    # Remove any trailing samples beyond the last actual event in natural-length mode.
-    # This guarantees the file length equals the generated audio rather than the GUI's
-    # requested maximum duration.
+    def event_note_name(idx: int) -> str:
+        f = float(musical_raw[idx])
+        if quantization == "chromatic":
+            return quantize_frequency(f, "chromatic")[1]
+        return hz_to_note(f)
+
+    # Loop over one motif. If repetition is enabled, the complete combinatorial grammar
+    # repeats from its beginning; if not, it ends naturally at the final event.
+    repetitions = 1
+    if repeat_to_target and natural_duration > 0:
+        repetitions = max(1, int(math.ceil(target_duration / natural_duration)))
+    full_plan = plan * repetitions
+
+    for rep, event in enumerate(full_plan):
+        indices = [int(i) for i in event["tone_indices"]]
+        if not indices:
+            continue
+        is_combo = event["event_type"] in {"combination", "all"}
+        event_beats = combo_beats if is_combo else single_beats
+        event_duration = event_beats * beat
+        if cursor_s >= render_duration:
+            break
+
+        if not is_combo:
+            idx = indices[0]
+            f_phys = float(physical[idx])
+            f_mus = float(musical_raw[idx])
+            if quantization == "chromatic":
+                f_render, note = quantize_frequency(f_mus, "chromatic")
+            elif quantization == "none":
+                f_render, note = f_mus, hz_to_note(f_mus)
+            else:
+                raise ValueError("quantization must be 'none' or 'chromatic'")
+            if not (0.0 < f_render < sr / 2.0):
+                cursor_s += event_duration + gap_beats * beat
+                continue
+            dur = min(event_duration * 0.90, max(0.0, render_duration - cursor_s))
+            render_tone(cursor_s, dur, f_render, 0.24 + 0.26 * float(salience[idx]))
+            events.append({
+                "event_number": int(event["event_number"]),
+                "repeat_number": rep + 1,
+                "section": event["section"],
+                "event_type": "single",
+                "tone_indices": str(indices),
+                "tone_count": 1,
+                "physical_frequencies_Hz": str([round(f_phys, 6)]),
+                "musical_frequencies_Hz": str([round(float(f_render), 6)]),
+                "notes": note,
+                "start_s": float(cursor_s),
+                "duration_s": float(dur),
+                "combination_render": "Single",
+                "combination_seed": int(combination_seed),
+            })
+        else:
+            # Preserve the chord identity while also producing an audible melodic line:
+            # arpeggiate through the subset, then add a short simultaneous chord tail.
+            converted = []
+            for idx in indices:
+                f_mus = float(musical_raw[idx])
+                if quantization == "chromatic":
+                    f_render, note = quantize_frequency(f_mus, "chromatic")
+                elif quantization == "none":
+                    f_render, note = f_mus, hz_to_note(f_mus)
+                else:
+                    raise ValueError("quantization must be 'none' or 'chromatic'")
+                if 0.0 < f_render < sr / 2.0:
+                    converted.append((idx, float(f_render), note))
+            if not converted:
+                cursor_s += event_duration + gap_beats * beat
+                continue
+
+            k = len(converted)
+            if combination_render == "Chord":
+                render_chord(cursor_s, min(event_duration * 0.90, render_duration - cursor_s), [x[0] for x in converted], 0.33)
+            else:
+                arp_fraction = 0.65 if combination_render == "Arpeggio + chord" else 0.95
+                arp_total = max(0.03, event_duration * arp_fraction)
+                per_note = arp_total / k
+                for pos, (idx, f_render, note) in enumerate(converted):
+                    render_tone(cursor_s + pos * per_note, min(per_note * 0.88, render_duration - (cursor_s + pos * per_note)), f_render, (0.28 + 0.18 * float(salience[idx])) / math.sqrt(k))
+                if combination_render == "Arpeggio + chord":
+                    chord_start = cursor_s + arp_total * 0.78
+                    chord_dur = min(event_duration - (chord_start - cursor_s), render_duration - chord_start)
+                    if chord_dur > 0:
+                        render_chord(chord_start, chord_dur * 0.92, [x[0] for x in converted], 0.30)
+
+            events.append({
+                "event_number": int(event["event_number"]),
+                "repeat_number": rep + 1,
+                "section": event["section"],
+                "event_type": event["event_type"],
+                "tone_indices": str(indices),
+                "tone_count": len(indices),
+                "physical_frequencies_Hz": str([round(float(physical[i]), 6) for i in indices]),
+                "musical_frequencies_Hz": str([round(float(f), 6) for _, f, _ in converted]),
+                "notes": " ".join(note for _, _, note in converted),
+                "start_s": float(cursor_s),
+                "duration_s": float(min(event_duration, render_duration - cursor_s)),
+                "combination_render": combination_render,
+                "combination_seed": int(combination_seed),
+            })
+
+        cursor_s += event_duration + gap_beats * beat
+
     if not repeat_to_target and events:
         end_s = max(e["start_s"] + e["duration_s"] for e in events)
         total = max(1, int(round(end_s * sr)))

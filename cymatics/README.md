@@ -1,4 +1,4 @@
-# DNA → 3D Geometry → 2D Molecular Artwork → Cymatics → Tones
+# DNA → 3D Geometry → 2D Molecular Artwork → Cymatics → Combinatorial Music
 
 DNA Cymatics is a research application for converting a DNA sequence into a **sequence-dependent 3-D structural model**, a **2-D molecular artwork target**, and a **set of resonator frequencies** that can be tested experimentally to create related cymatics artwork.
 
@@ -19,7 +19,7 @@ The supplied example uses a rolling-turn molecular projection and a circular thi
 
 The image below is a **software-generated validation preview** for the canonical hoxb1a-201 workflow. It is not a photograph of a physical cymatics experiment. The panels are intended to show how molecular geometry is transformed into a resonator-compatible target and then into a predicted modal reconstruction.
 
-![hoxb1a-201 DNA Cymatics v0.10 preview](examples/hoxb1a/preview.png)
+![hoxb1a-201 DNA Cymatics v0.12 preview](examples/hoxb1a/preview.png)
 
 Example files are in [`examples/hoxb1a/`](examples/hoxb1a/):
 
@@ -213,7 +213,7 @@ The audio contains the frequencies and amplitudes required by the selected model
 
 ### 9. Generate musical tones separately
 
-The musical output is a different product.
+The musical output is a different product. The main run now returns both the rendered musical WAV and a downloadable `musical_combination_melody.csv` event plan, so the melody structure is an explicit output rather than being hidden inside the audio file.
 
 The physical frequencies can be mapped into a practical musical register and optionally quantized to notes. Harmonics, duration, rhythm, and envelope can then be added for creative use or for feeding systems such as Suno.
 
@@ -377,16 +377,34 @@ The strongest claim the current software can support is:
 A real cymatics experiment is required to determine how closely the predicted pattern matches the physical system.
 ## Musical sonification rendering
 
-The musical WAV is a creative interpretation of the inverse-fit mode spectrum, not the physical cymatics drive signal. The renderer uses a global frequency scale so the ratios between DNA-derived resonances are preserved before optional chromatic quantization. The default **Salience contour** arrangement places the strongest spatial modes first and then traverses the selected frequencies in ascending/descending order, producing a repeatable motif rather than relying on dataframe order.
+The musical layer is designed as a **melody generator over an unknown-in-advance tone set**. The resonator inverse solve determines the source frequencies first, but the melody grammar does not need those numeric values when it is constructed. It needs only the number of source tones and their canonical order.
 
-By default, **Repeat motif to target duration** is OFF. In that mode the WAV is **automatically trimmed to the actual generated event length**, so a requested 24-second maximum does not create a 24-second file containing only 6–8 seconds of sound. Enable repetition when a longer, cyclic input is preferred for music-generation systems such as Suno.
+The default `DNA Combination Melody` has three sections:
 
-The exact unquantized resonances remain in the separate physical-drive WAV outputs; changing musical ordering or quantization does not change the physical mode solution.
+```text
+DECLARATION
+T1  T2  T3  ...  TN
+(each distinct source tone appears once)
 
-### Musical arrangement and WAV length
+COMBINATORIAL DEVELOPMENT
+S1  S2  S3  ...  SK
+(random subsets of the tone set; subset size cycles across the requested range)
 
-The musical sonification renderer is intentionally separate from the exact physical-drive renderer. It uses the inverse-fit resonant mode spectrum as its source material, then creates a repeatable musical motif. The default **Salience contour** ordering places the strongest spatial modes first and then traverses the selected frequencies in an ascending/descending contour. **Frequency ascending** and **Angular symmetry** are also available.
+SYNTHESIS / CADENCE
+T1 + T2 + ... + TN
+(an explicit combination containing every tone)
+```
 
-The renderer no longer writes a silent tail. With **Repeat motif to target duration** disabled, a requested duration is treated as a maximum and the WAV is truncated to the end of the final generated note. This means, for example, that a 24-second target can legitimately produce a ~5-second WAV when only one pass through the selected modes was generated. With repetition enabled, the motif is repeated and the result is trimmed exactly to the requested duration.
+This construction guarantees that every source tone is heard individually, then explores combinations of tones, and finally presents the complete set. A seeded pseudo-random generator makes the melody reproducible. Changing the seed generates a different valid melody without changing the source tone set.
 
-**Musical interval compression** controls how much the physical resonance spectrum is compressed in log-frequency before optional chromatic quantization. A value of 1.0 preserves the physical frequency ratios; lower values make large resonant-frequency jumps more compact and melodic while leaving the physical-drive WAV unchanged.
+For each combination, the default `Arpeggio + chord` renderer first exposes the constituent tones melodically and then plays them together as a chord. This provides a music-generation system with both sequential and simultaneous information. `Arpeggio` and `Chord` are available when a different musical representation is preferred.
+
+The exact generated event sequence is exported to `musical_combination_melody.csv`. Each event records its section, type, source tone indices, tone count, physical frequencies, musical frequencies, note names, start time, duration, and random seed.
+
+Chromatic pitch quantization is optional. When it is enabled, two physically different source resonances may map to the same musical pitch; their source identities remain distinct in the event manifest. Select `none` when preserving the calculated musical frequencies is more important than conventional note names.
+
+### Musical duration
+
+When `Repeat motif to target duration` is disabled, the WAV ends at the final generated event and contains no manufactured silent tail. When enabled, the complete declaration → combinations → all-tones grammar repeats from its beginning until the requested duration and is then trimmed exactly.
+
+The musical output remains separate from the physical-drive WAV. Musical arrangement, pitch quantization, tempo, and interval compression do not change the exact physical resonance frequencies used by the physical experiment.

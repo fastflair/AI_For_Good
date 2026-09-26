@@ -28,6 +28,7 @@ from dna_cymatics import (
     prepare_resonator_target,
     observable_to_sand_artwork,
     create_musical_audio_from_modes,
+    generate_combination_melody_plan,
     create_physical_drive_audio,
     create_simultaneous_physical_drive_audio,
     apply_resonator_calibration,
@@ -158,11 +159,11 @@ def test_circular_modes_and_audio():
     physical_mix, mix_events = create_simultaneous_physical_drive_audio(modes, duration_s=1.0)
     assert physical_mix.ndim == 1 and mix_events
     physical, events = create_physical_drive_audio(modes, duration_per_mode_s=0.2)
-    musical, mevents = create_musical_audio_from_modes(modes, duration_s=10.0, quantization="chromatic")
+    musical, mevents = create_musical_audio_from_modes(modes, duration_s=30.0, quantization="chromatic")
     assert physical.ndim == musical.ndim == 1
     assert events and mevents
     # Natural-length mode must not pad the file to the requested maximum duration.
-    assert len(musical) / 44_100.0 < 10.0
+    assert len(musical) / 44_100.0 < 30.0
     # Repeat mode must fill the requested duration exactly (within one sample).
     repeated, repeated_events = create_musical_audio_from_modes(
         modes, duration_s=3.0, quantization="chromatic", repeat_to_target=True
@@ -175,6 +176,41 @@ def test_circular_modes_and_audio():
     )
     assert none_audio.ndim == 1 and none_events
 
+
+
+
+def test_combinatorial_melody_plan():
+    plan = generate_combination_melody_plan(5, tone_order=[0, 1, 2, 3, 4], combination_count=10, min_combination_size=2, max_combination_size=4, seed=123, include_all_tones=True)
+    singles = [e["tone_indices"][0] for e in plan if e["event_type"] == "single"]
+    assert singles == [0, 1, 2, 3, 4]
+    combos = [e["tone_indices"] for e in plan if e["event_type"] == "combination"]
+    assert len(combos) == 10
+    assert all(2 <= len(c) <= 4 for c in combos)
+    assert plan[-1]["event_type"] == "all"
+    assert set(plan[-1]["tone_indices"]) == set(range(5))
+    # Same seed reproduces the same combinatorial melody; a changed seed changes it.
+    plan2 = generate_combination_melody_plan(5, tone_order=[0, 1, 2, 3, 4], combination_count=10, min_combination_size=2, max_combination_size=4, seed=123, include_all_tones=True)
+    plan3 = generate_combination_melody_plan(5, tone_order=[0, 1, 2, 3, 4], combination_count=10, min_combination_size=2, max_combination_size=4, seed=124, include_all_tones=True)
+    assert [p["tone_indices"] for p in plan] == [p["tone_indices"] for p in plan2]
+    assert [p["tone_indices"] for p in plan] != [p["tone_indices"] for p in plan3]
+    # Two-tone edge case remains valid.
+    two = generate_combination_melody_plan(2, seed=1, combination_count=10)
+    assert [p["event_type"] for p in two] == ["single", "single", "all"]
+
+def test_combinatorial_melody_audio():
+    field = circular_membrane_mode_field(5, 1, size=64, nodal=True)
+    modes, _ = rank_circular_membrane_modes(field, 0.15, 120.0, max_angular_mode=7, max_radial_mode=3, top_modes=5, fit_size=64)
+    audio, events = create_musical_audio_from_modes(
+        modes, duration_s=20.0, quantization="chromatic", arrangement="DNA Combination Melody",
+        combination_count=8, min_combination_size=2, max_combination_size=4, combination_seed=99,
+        include_all_tones=True, combination_render="Arpeggio + chord", combination_beats=1.25,
+    )
+    assert audio.ndim == 1 and np.isfinite(audio).all() and np.max(np.abs(audio)) <= 0.93
+    assert any(e["event_type"] == "single" for e in events)
+    assert any(e["event_type"] == "combination" for e in events)
+    assert any(e["event_type"] == "all" for e in events)
+    singleton_indices = {int(e["tone_indices"].strip("[]").split(",")[0]) for e in events if e["event_type"] == "single"}
+    assert singleton_indices == set(range(len(modes)))
 
 
 def test_resonator_calibration():

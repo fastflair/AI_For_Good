@@ -144,3 +144,22 @@ A strong experiment would record:
 8. repeat measurements.
 
 The measured mode library can then replace the ideal analytical mode library. That is the preferred path for future versions.
+
+
+## Combinatorial musical sonification
+
+The musical layer is an interpretive mapping, not part of the physical resonator inverse problem. The input to this layer is a finite set of calculated source resonances. Let the tone identities be
+
+\[
+\mathcal{T}=\{T_1,T_2,\ldots,T_N\}.
+\]
+
+The melody generator constructs an ordered event sequence
+
+\[
+M = [T_1, T_2, \ldots, T_N, S_1, S_2, \ldots, S_K, \mathcal{T}],
+\]
+
+where each `S_k` is a randomly selected subset of `\mathcal{T}` with cardinality between user-defined bounds. The random process is seeded, so the sequence is reproducible. The final set event explicitly contains all tones.
+
+For audio, a combination can be represented as an arpeggio, chord, or an arpeggio followed by a chord. The latter is the default because it exposes both individual tone identities and the combined harmonic object. Musical pitch quantization occurs only in this creative layer; the physical-drive WAV continues to use the calculated/calibrated resonant frequencies.
