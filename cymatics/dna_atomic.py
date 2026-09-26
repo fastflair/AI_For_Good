@@ -23,6 +23,10 @@ class AtomicStructureError(RuntimeError):
     pass
 
 
+INTERNAL_PARAMETRIC_SOURCE = "Internal parametric heavy-atom model"
+UPLOADED_STRUCTURE_SOURCE = "Uploaded PDB/mmCIF"
+
+
 @dataclass(frozen=True)
 class AtomicStructure:
     atoms: np.ndarray
@@ -357,7 +361,7 @@ def build_parametric_atomic_dna(dna_structure, dna_form: str = "B-DNA") -> Atomi
         tuple(elements),
         tuple(names),
         tuple(residues),
-        "Internal sequence-derived parametric heavy-atom model",
+        INTERNAL_PARAMETRIC_SOURCE,
         dna_form,
         {
             "generator": "pure-python-parametric-nucleic-acid-geometry",

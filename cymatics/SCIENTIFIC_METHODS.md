@@ -230,3 +230,7 @@ The internal sequence-to-atomic model is not equivalent to crystallographic or c
 Sequence alone does not uniquely specify a physical DNA structure because conformation depends on sequence, environment, ions, hydration, binding partners, supercoiling, mechanical constraints and other factors.
 
 Consequently, any frequency generated from this model belongs to the **chosen resonator model**, not to DNA as an intrinsic property.
+
+## Runtime source identifier
+
+The built-in atomistic path uses one canonical identifier: `Internal parametric heavy-atom model`. The UI imports this value from the geometry module rather than duplicating the string. Uploaded PDB/mmCIF is likewise represented by a canonical constant. This prevents a UI/runtime label mismatch from selecting an unsupported branch.

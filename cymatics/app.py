@@ -16,6 +16,8 @@ import soundfile as sf
 from dna_atomic import (
     AtomicStructure,
     AtomicStructureError,
+    INTERNAL_PARAMETRIC_SOURCE,
+    UPLOADED_STRUCTURE_SOURCE,
     atomic_density_projection,
     atomic_edge_target,
     build_parametric_atomic_dna,
@@ -225,11 +227,11 @@ def load_retrieved_sequence(choice, catalog):
 def _make_atomic_structure(sequence: str, source: str, dna_form: str, pdb_file: str | None):
     coarse = build_dna_structure(sequence, model="sequence-dependent")
     warning = ""
-    if source == "Uploaded PDB/mmCIF":
+    if source == UPLOADED_STRUCTURE_SOURCE:
         if not pdb_file:
             raise AtomicStructureError("Upload a PDB or mmCIF structure first.")
         return load_structure(pdb_file), coarse, warning
-    if source == "Internal sequence-derived atom-site model":
+    if source in {INTERNAL_PARAMETRIC_SOURCE, "Internal sequence-derived atom-site model"}:
         atomic = build_parametric_atomic_dna(coarse, dna_form=dna_form)
         warning = (
             "Using the built-in parametric heavy-atom geometry model. It uses standard nucleic-acid atom names "
@@ -452,8 +454,8 @@ The canonical sequence is **zebrafish hoxb1a-201**, 1,507 nt. The default sequen
                 sequence = gr.Textbox(value=SAMPLE_DNA, lines=8, label="DNA sequence (5′→3′)", info="Canonical hoxb1a-201 = 1,507 nt")
                 dna_model = gr.Radio(["sequence-dependent", "canonical"], value="sequence-dependent", label="Coarse DNA model")
                 structure_source = gr.Radio(
-                    ["Internal parametric heavy-atom model", "Uploaded PDB/mmCIF"],
-                    value="Internal parametric heavy-atom model", label="3D structure source"
+                    [INTERNAL_PARAMETRIC_SOURCE, UPLOADED_STRUCTURE_SOURCE],
+                    value=INTERNAL_PARAMETRIC_SOURCE, label="3D structure source"
                 )
                 dna_form = gr.Dropdown(["A-DNA", "B-DNA", "C-DNA", "Z-DNA (idealized left-handed)", "A-RNA"], value="B-DNA", label="Nucleic-acid reference conformation")
                 pdb_file = gr.File(file_types=[".pdb", ".cif", ".mmcif"], type="filepath", label="Optional PDB/mmCIF structure")

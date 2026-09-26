@@ -14,6 +14,7 @@ from dna_atomic import (
     pca_align_axis,
     build_parametric_atomic_dna,
     DNA_FORM_PRESETS,
+    INTERNAL_PARAMETRIC_SOURCE,
 )
 from dna_cymatics import (
     STEP_PARAMS,
@@ -110,6 +111,14 @@ def test_geometry_and_atomic_projection():
     assert np.isfinite(edges).all()
 
 
+
+
+def test_structure_source_contract():
+    # This exact label is emitted by the UI and must be accepted by the pipeline.
+    dna = build_dna_structure(SEQ, model="sequence-dependent")
+    atomic = build_parametric_atomic_dna(dna, dna_form="B-DNA")
+    assert atomic.source == INTERNAL_PARAMETRIC_SOURCE
+
 def test_internal_parametric_builder():
     dna = build_dna_structure(SEQ, model="sequence-dependent")
     for form in DNA_FORM_PRESETS:
@@ -155,5 +164,5 @@ def test_harmonics_and_registration():
 
 if __name__ == "__main__":
     test_sequence(); test_hoxb1a_canonical(); test_sequence_source_helpers(); test_sequence_bundle_write()
-    test_geometry_and_atomic_projection(); test_internal_parametric_builder(); test_circular_modes_and_audio(); test_harmonics_and_registration()
+    test_geometry_and_atomic_projection(); test_structure_source_contract(); test_internal_parametric_builder(); test_circular_modes_and_audio(); test_harmonics_and_registration()
     print("All tests passed.")

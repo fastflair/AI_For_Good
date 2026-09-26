@@ -18,3 +18,6 @@ The application has no required external molecular builder.
 4. Numerical acceleration
    The current implementation uses NumPy/SciPy vectorization. No GPU or compiled
    molecular-dynamics engine is required for the sequence-only geometry path.
+
+
+No external molecular structure builder is required. The production sequence-only 3D path is implemented in pure Python. Optional PDB/mmCIF upload support uses Biopython for parsing.

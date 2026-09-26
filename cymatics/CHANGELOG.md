@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.1
+- Fixed a production bug where the UI emitted `Internal parametric heavy-atom model` but the runtime dispatcher expected a different legacy string, causing `Unsupported structure source` errors.
+- Added canonical structure-source constants shared by UI and runtime.
+- Added a regression test for the exact UI source identifier.
+- Removed stale `INSTALL_NAB.txt` from the distributable package.
+
+
 ## 0.6 — self-contained sequence-to-geometry build
 
 - Removed all AmberTools/NAB runtime code and configuration.
