@@ -158,9 +158,22 @@ def test_circular_modes_and_audio():
     physical_mix, mix_events = create_simultaneous_physical_drive_audio(modes, duration_s=1.0)
     assert physical_mix.ndim == 1 and mix_events
     physical, events = create_physical_drive_audio(modes, duration_per_mode_s=0.2)
-    musical, mevents = create_musical_audio_from_modes(modes, duration_s=2.0, quantization="chromatic")
+    musical, mevents = create_musical_audio_from_modes(modes, duration_s=10.0, quantization="chromatic")
     assert physical.ndim == musical.ndim == 1
     assert events and mevents
+    # Natural-length mode must not pad the file to the requested maximum duration.
+    assert len(musical) / 44_100.0 < 10.0
+    # Repeat mode must fill the requested duration exactly (within one sample).
+    repeated, repeated_events = create_musical_audio_from_modes(
+        modes, duration_s=3.0, quantization="chromatic", repeat_to_target=True
+    )
+    assert repeated_events
+    assert abs(len(repeated) / 44_100.0 - 3.0) < 1 / 44_100
+    # Physical frequency ratios are used as the musical pre-quantization relationship.
+    none_audio, none_events = create_musical_audio_from_modes(
+        modes, duration_s=2.0, quantization="none", arrangement="Frequency ascending", interval_compression=0.60
+    )
+    assert none_audio.ndim == 1 and none_events
 
 
 

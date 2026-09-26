@@ -269,6 +269,7 @@ def run_pipeline(
     candidate_pool, node_width, actuator_r_fraction, actuator_theta_deg, inverse_regularization,
     calibration_csv, calibration_tolerance_hz, use_calibrated_frequency,
     target_type, physical_duration_per_mode_s, physical_mix_duration_s, musical_quantization, musical_duration_s, tempo_bpm,
+    musical_arrangement, musical_beats_per_note, musical_repeat_to_target, musical_interval_compression,
 ):
     try:
         seq = clean_sequence(sequence)
@@ -341,7 +342,9 @@ def run_pipeline(
         )
         musical_audio, musical_events = create_musical_audio_from_modes(
             modes, duration_s=float(musical_duration_s), tempo_bpm=float(tempo_bpm),
-            quantization=musical_quantization,
+            quantization=musical_quantization, arrangement=musical_arrangement,
+            repeat_to_target=bool(musical_repeat_to_target), beats_per_note=float(musical_beats_per_note),
+            interval_compression=float(musical_interval_compression),
         )
 
         sand_prediction = observable_to_sand_artwork(mode_recon, mode=target_type)
@@ -464,7 +467,7 @@ def run_pipeline(
         note_lines += [
             "",
             "**Physical-drive interpretation:** the **MODE MIXTURE WAV** is the primary inverse-model drive. It is a time-averaged multimode approximation, not a guarantee of one static Chladni figure. "
-            "The predicted sand artwork is derived from the fitted observable. The sequential WAV is for resonance isolation/calibration, the BEST SINGLE MODE WAV isolates the strongest single-mode match, and the musical WAV is a separate creative sonification.",
+            "The predicted sand artwork is derived from the fitted observable. The sequential WAV is for resonance isolation/calibration, the BEST SINGLE MODE WAV isolates the strongest single-mode match, and the musical WAV is a separate creative sonification. When motif repetition is OFF, the musical WAV is automatically truncated to its actual generated event length (no silent tail); when ON, the motif repeats to the requested duration.",
         ]
 
         return (
@@ -599,9 +602,13 @@ The canonical sequence is **zebrafish hoxb1a-201**, 1,507 nt. The default sequen
                 calibration_tolerance_hz = gr.Slider(10, 1000, value=250, step=10, label="Calibration frequency matching tolerance (Hz)")
                 use_calibrated_frequency = gr.Checkbox(value=True, label="Use measured resonance frequencies when calibration CSV is supplied")
                 musical_quantization = gr.Radio(["none", "chromatic"], value="chromatic", label="Musical pitch quantization")
+                musical_arrangement = gr.Radio(["Salience contour", "Frequency ascending", "Angular symmetry"], value="Salience contour", label="Musical note order", info="Salience contour uses the strongest DNA-derived spatial modes first, then an ascending/descending frequency contour.")
+                musical_beats_per_note = gr.Slider(0.25, 2.0, value=0.75, step=0.25, label="Beats per note")
+                musical_interval_compression = gr.Slider(0.45, 1.0, value=0.70, step=0.05, label="Musical interval compression", info="1.0 preserves physical frequency ratios; lower values compress extreme jumps into a more practical melodic range.")
+                musical_repeat_to_target = gr.Checkbox(value=False, label="Repeat motif to target duration", info="OFF: WAV is automatically truncated to actual generated audio. ON: repeat the motif until the requested duration, then trim exactly.")
                 physical_duration_per_mode_s = gr.Slider(0.5, 10, value=2.0, step=0.5, label="Calibration seconds per mode")
                 physical_mix_duration_s = gr.Slider(3, 60, value=12, step=1, label="PRIMARY physical mode-mixture duration (s)")
-                musical_duration_s = gr.Slider(8, 120, value=24, step=1, label="Musical WAV duration (s)")
+                musical_duration_s = gr.Slider(4, 120, value=24, step=1, label="Musical WAV target duration (s)")
                 tempo_bpm = gr.Slider(40, 180, value=96, step=1, label="Musical tempo (BPM)")
                 run = gr.Button("Build DNA target + inverse resonant tone set", variant="primary")
 
@@ -635,7 +642,7 @@ The canonical sequence is **zebrafish hoxb1a-201**, 1,507 nt. The default sequen
                     target_transform, target_smoothing_px, resonator_model, membrane_radius_mm, membrane_speed, plate_thickness_mm, plate_material,
                     max_angular_mode, max_radial_mode, top_modes,
                     candidate_pool, node_width, actuator_r_fraction, actuator_theta_deg, inverse_regularization, calibration_csv, calibration_tolerance_hz, use_calibrated_frequency,
-                    target_type, physical_duration_per_mode_s, physical_mix_duration_s, musical_quantization, musical_duration_s, tempo_bpm],
+                    target_type, physical_duration_per_mode_s, physical_mix_duration_s, musical_quantization, musical_duration_s, tempo_bpm, musical_arrangement, musical_beats_per_note, musical_repeat_to_target, musical_interval_compression],
             outputs=[out_3d, out_projection_literal, out_projection_target, out_projection_resonator_target, out_spectrum, out_recon, out_sand, out_fit, out_table, out_summary,
                      physical_mix_audio, physical_audio, best_mode_audio, musical_audio, out_bundle, reference_state],
         )

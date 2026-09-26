@@ -1,3 +1,12 @@
+## v0.11 — Musical sonification and WAV-length fix
+
+- Fixed trailing-silence/over-allocation behavior in the musical WAV. Natural-length renders now end at the final generated event instead of the requested maximum duration.
+- Added optional motif repetition to intentionally fill a requested target duration.
+- Added selectable musical note arrangements: Salience contour, Frequency ascending, and Angular symmetry.
+- Preserved physical frequency ratios using one global musical scaling factor before optional chromatic quantization.
+- Added weighted note dynamics and configurable beats-per-note.
+- Added regression tests for natural-length trimming and exact-duration repetition.
+
 # Changelog
 
 ## v0.10 — sequence-wide inverse cymatics workflow

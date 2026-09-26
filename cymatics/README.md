@@ -375,3 +375,18 @@ The strongest claim the current software can support is:
 > Given a defined DNA sequence, a defined structural model, a defined 2-D projection, and a defined resonator model, the application can calculate a reproducible set of candidate resonant frequencies whose modeled spatial field most closely approximates the selected DNA-derived target within that model.
 
 A real cymatics experiment is required to determine how closely the predicted pattern matches the physical system.
+## Musical sonification rendering
+
+The musical WAV is a creative interpretation of the inverse-fit mode spectrum, not the physical cymatics drive signal. The renderer uses a global frequency scale so the ratios between DNA-derived resonances are preserved before optional chromatic quantization. The default **Salience contour** arrangement places the strongest spatial modes first and then traverses the selected frequencies in ascending/descending order, producing a repeatable motif rather than relying on dataframe order.
+
+By default, **Repeat motif to target duration** is OFF. In that mode the WAV is **automatically trimmed to the actual generated event length**, so a requested 24-second maximum does not create a 24-second file containing only 6–8 seconds of sound. Enable repetition when a longer, cyclic input is preferred for music-generation systems such as Suno.
+
+The exact unquantized resonances remain in the separate physical-drive WAV outputs; changing musical ordering or quantization does not change the physical mode solution.
+
+### Musical arrangement and WAV length
+
+The musical sonification renderer is intentionally separate from the exact physical-drive renderer. It uses the inverse-fit resonant mode spectrum as its source material, then creates a repeatable musical motif. The default **Salience contour** ordering places the strongest spatial modes first and then traverses the selected frequencies in an ascending/descending contour. **Frequency ascending** and **Angular symmetry** are also available.
+
+The renderer no longer writes a silent tail. With **Repeat motif to target duration** disabled, a requested duration is treated as a maximum and the WAV is truncated to the end of the final generated note. This means, for example, that a 24-second target can legitimately produce a ~5-second WAV when only one pass through the selected modes was generated. With repetition enabled, the motif is repeated and the result is trimmed exactly to the requested duration.
+
+**Musical interval compression** controls how much the physical resonance spectrum is compressed in log-frequency before optional chromatic quantization. A value of 1.0 preserves the physical frequency ratios; lower values make large resonant-frequency jumps more compact and melodic while leaving the physical-drive WAV unchanged.

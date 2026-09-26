@@ -1440,6 +1440,7 @@ def create_simultaneous_physical_drive_audio(
     return audio.astype(np.float32), events
 
 
+
 def create_musical_audio_from_modes(
     mode_table: pd.DataFrame,
     duration_s: float = 24.0,
@@ -1447,58 +1448,190 @@ def create_musical_audio_from_modes(
     tempo_bpm: float = 96.0,
     quantization: str = "chromatic",
     harmonic_order: int = 4,
+    arrangement: str = "Salience contour",
+    repeat_to_target: bool = False,
+    beats_per_note: float = 0.75,
+    phrase_gap_beats: float = 0.25,
+    interval_compression: float = 0.70,
 ) -> tuple[np.ndarray, list[dict]]:
-    """Create a listening/Suno-oriented sonification from the physical mode spectrum.
+    """Create a listening/Suno-oriented musical sonification.
 
-    Unlike the physical drive, this intentionally remaps the logarithmic frequency
-    relationships into a comfortable musical register. It preserves interval ratios
-    as much as possible, but it is not a physical excitation signal.
+    Improvements over the original renderer:
+    * Never pads the WAV with silent trailing samples.  With ``repeat_to_target=False``
+      the file is exactly the length of the generated musical sequence (capped by
+      ``duration_s``).
+    * Uses one global frequency scale factor so physical frequency ratios are preserved
+      exactly before optional chromatic quantization.  The old implementation folded
+      each note independently by octave, which distorted interval relationships.
+    * Orders modes by spatial salience and uses an ascending/descending contour so the
+      strongest DNA-derived modes are heard as a coherent motif rather than arbitrary
+      dataframe order.
+    * Stronger modes receive slightly longer/louder notes.
+    * Optional phrase repetition can intentionally fill the requested duration for a
+      longer Suno input; otherwise the output stays at its natural generated length.
+    * Adds a small phrase gap while keeping phase-continuous note envelopes within notes.
+
+    This is a creative sonification, NOT the physical cymatics drive waveform. The
+    exact unquantized physical frequencies remain in the separate physical-drive WAVs.
     """
     if mode_table.empty:
         raise ValueError("No modes available")
-    sr = int(sample_rate); total = int(round(float(duration_s) * sr))
+    sr = int(sample_rate)
+    target_duration = float(duration_s)
+    if target_duration <= 0 or sr < 8_000:
+        raise ValueError("duration_s must be positive and sample_rate must be >= 8000")
     beat = 60.0 / max(float(tempo_bpm), 1.0)
-    mode_count = len(mode_table)
-    physical = np.asarray(mode_table["frequency_Hz"], dtype=float)
-    f_ref = max(float(np.min(physical[physical > 0])), 1.0)
-    # Preserve logarithmic relationships while placing the result around A3/A4.
-    musical_base = 220.0
-    weights = np.asarray(mode_table.get("mixture_weight", np.ones(mode_count)), dtype=float)
-    weights = np.sqrt(np.maximum(weights, 0.0))
-    weights = weights / max(float(weights.max()), 1e-9)
+    note_beats = max(float(beats_per_note), 0.25)
+    interval_compression = float(interval_compression)
+    if not (0.25 <= interval_compression <= 1.0):
+        raise ValueError("interval_compression must be between 0.25 and 1.0")
+    gap_beats = max(float(phrase_gap_beats), 0.0)
+    note_len = beat * note_beats
+    slot_len = note_len + beat * gap_beats
+
+    df = mode_table.copy().reset_index(drop=True)
+    physical = pd.to_numeric(df["frequency_Hz"], errors="coerce").to_numpy(float)
+    valid = np.isfinite(physical) & (physical > 0.0) & (physical < sr / 2.0)
+    df = df.loc[valid].reset_index(drop=True)
+    physical = physical[valid]
+    if len(df) == 0:
+        raise ValueError("No valid mode frequencies available")
+
+    weights = pd.to_numeric(df.get("mixture_weight", pd.Series(np.ones(len(df)))), errors="coerce").fillna(0.0).to_numpy(float)
+    corr = pd.to_numeric(df.get("single_mode_correlation", pd.Series(np.zeros(len(df)))), errors="coerce").fillna(0.0).to_numpy(float)
+    # Spatial salience is intentionally positive and bounded. It combines how strongly
+    # the mode participates in the inverse fit with its direct image match.
+    w = np.maximum(weights, 0.0)
+    if w.max() > 0:
+        w = w / w.max()
+    c = np.clip((corr + 1.0) * 0.5, 0.0, 1.0)
+    salience = 0.65 * w + 0.35 * c
+    df["_salience"] = salience
+
+    if arrangement == "Frequency ascending":
+        base_order = np.argsort(physical, kind="stable")
+        motif = list(base_order)
+    elif arrangement == "Angular symmetry":
+        m = pd.to_numeric(df.get("m", pd.Series(np.zeros(len(df)))), errors="coerce").fillna(0).to_numpy(int)
+        n = pd.to_numeric(df.get("n", pd.Series(np.ones(len(df)))), errors="coerce").fillna(1).to_numpy(int)
+        motif = list(np.lexsort((n, physical, m)))
+    elif arrangement == "Salience contour":
+        # Start from the most important spatial modes, then return through their
+        # frequency ordering. This creates a recognizable A-B-A' contour while retaining
+        # the DNA-derived mode set and relative salience.
+        sal_order = list(np.argsort(-salience, kind="stable"))
+        top = sal_order[: min(len(sal_order), 6)]
+        low_high = list(np.argsort(physical, kind="stable"))
+        high_low = list(reversed(low_high))
+        # Keep unique modes while favoring salience early in the phrase.
+        motif = []
+        for idx in top + low_high + high_low:
+            if idx not in motif:
+                motif.append(int(idx))
+        # Ensure every mode is heard at least once.
+        for idx in sal_order:
+            if idx not in motif:
+                motif.append(int(idx))
+    else:
+        raise ValueError("Unknown musical arrangement")
+
+    # Preserve physical interval ratios with one global scale, then shift the entire
+    # collection by octaves as a group to fit a practical musical register. This is
+    # materially better than octave-folding each note independently.
+    gmean = float(np.exp(np.mean(np.log(np.maximum(physical, 1e-9)))))
+    musical_center = 220.0  # A3 reference region
+    # Work in log-frequency. Compression below 1.0 makes very wide resonator spectra
+    # musically usable while preserving ordering and smooth interval relationships.
+    log_ratio = np.log2(np.maximum(physical, 1e-9) / max(gmean, 1e-9))
+    musical_raw = musical_center * np.power(2.0, interval_compression * log_ratio)
+    # One common octave shift keeps the collection in a useful register without changing
+    # the intervals relative to one another.
+    while float(np.median(musical_raw)) < 110.0:
+        musical_raw *= 2.0
+    while float(np.median(musical_raw)) > 880.0:
+        musical_raw /= 2.0
+
+    # Build a finite motif, then either render once (natural-length mode) or repeat it
+    # enough times to reach the user's requested target duration and trim exactly.
+    motif_slots = len(motif) * slot_len + beat * gap_beats
+    if motif_slots <= 0:
+        raise ValueError("Generated musical motif has zero duration")
+    if repeat_to_target:
+        repetitions = max(1, int(math.ceil(target_duration / motif_slots)))
+        sequence = (motif * repetitions)
+        render_duration = target_duration
+    else:
+        sequence = motif
+        render_duration = min(target_duration, motif_slots)
+
+    total = max(1, int(round(render_duration * sr)))
     audio = np.zeros(total, dtype=float)
     events: list[dict] = []
-    note_len = max(0.25, beat)
-    for idx, (_, row) in enumerate(mode_table.iterrows()):
-        f_phys = max(float(row["frequency_Hz"]), 1e-9)
-        ratio = f_phys / f_ref
-        f_mus = musical_base * ratio
-        # Keep generated notes inside a practical musical register by octave folding.
-        while f_mus < 110.0: f_mus *= 2.0
-        while f_mus > 880.0: f_mus /= 2.0
+    H = max(1, int(harmonic_order))
+    harmonic_norm = sum(1.0 / h for h in range(1, H + 1))
+    t_cursor = 0.0
+
+    for event_idx, idx in enumerate(sequence):
+        f_phys = float(physical[idx])
+        f_mus = float(musical_raw[idx])
         if quantization == "chromatic":
             f_render, note = quantize_frequency(f_mus, "chromatic")
         elif quantization == "none":
             f_render, note = f_mus, hz_to_note(f_mus)
         else:
             raise ValueError("quantization must be 'chromatic' or 'none'.")
-        start = int(round((idx * note_len) * sr)) % total
-        n = min(int(round(note_len * 0.88 * sr)), total - start)
-        if n <= 0 or f_render <= 0 or f_render >= sr / 2: continue
+        if not (0.0 < f_render < sr / 2.0):
+            continue
+
+        start = int(round(t_cursor * sr))
+        if start >= total:
+            break
+        n = min(int(round(note_len * sr)), total - start)
+        if n <= 0:
+            break
         t = np.arange(n, dtype=float) / sr
-        env = _fade_envelope(n, sr, attack_s=0.03, release_s=min(0.12, note_len * 0.25))
+        release = min(0.16, note_len * 0.28)
+        attack = min(0.025, note_len * 0.12)
+        env = _fade_envelope(n, sr, attack_s=attack, release_s=release)
         signal = np.zeros(n, dtype=float)
-        H = max(1, int(harmonic_order))
         for h in range(1, H + 1):
-            signal += (1.0 / h) * np.sin(2.0 * math.pi * f_render * h * t)
-        signal /= sum(1.0 / h for h in range(1, H + 1))
-        amp = 0.12 + 0.34 * float(weights[idx])
-        audio[start:start+n] += amp * env * signal
+            # Mild harmonic rolloff plus a tiny inharmonicity term keeps the sound richer
+            # without making the note spectrum dominate the frequency identity.
+            partial = f_render * h * (1.0 + 0.0006 * (h - 1) ** 2)
+            if partial >= sr / 2.0:
+                break
+            signal += (1.0 / (h ** 1.15)) * np.sin(2.0 * math.pi * partial * t)
+        normalizer = sum(1.0 / (h ** 1.15) for h in range(1, H + 1))
+        signal /= max(normalizer, 1e-9)
+
+        sal = float(salience[idx])
+        # Emphasize spatially important modes without making the loudness overpowering.
+        amp = 0.12 + 0.28 * sal
+        audio[start:start + n] += amp * env * signal
         events.append({
-            "mode_index": idx + 1, "physical_frequency_Hz": f_phys,
-            "musical_frequency_Hz": float(f_render), "note": note,
-            "relative_mode_weight": float(weights[idx]),
+            "event_index": event_idx + 1,
+            "mode_index": int(idx + 1),
+            "start_s": float(start / sr),
+            "duration_s": float(n / sr),
+            "physical_frequency_Hz": f_phys,
+            "musical_frequency_Hz": f_render,
+            "note": note,
+            "relative_mode_weight": float(max(w[idx], 0.0)),
+            "spatial_salience": sal,
+            "arrangement": arrangement,
+            "interval_compression": float(interval_compression),
         })
+        t_cursor += slot_len
+
+    # Remove any trailing samples beyond the last actual event in natural-length mode.
+    # This guarantees the file length equals the generated audio rather than the GUI's
+    # requested maximum duration.
+    if not repeat_to_target and events:
+        end_s = max(e["start_s"] + e["duration_s"] for e in events)
+        total = max(1, int(round(end_s * sr)))
+        audio = audio[:total]
     peak = float(np.max(np.abs(audio)))
-    if peak > 0: audio = 0.92 * audio / peak
+    if peak > 0:
+        audio = 0.92 * audio / peak
     return audio.astype(np.float32), events
+
