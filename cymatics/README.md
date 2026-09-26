@@ -1,205 +1,309 @@
-# DNA → 3D Atomic Geometry → 2D Molecular Target → Cymatics → Music
+# DNA → 3D Geometry → 2D Atomic Pattern → Resonator Modes → Audio
 
-Version 0.5 research build
+Version 0.6
 
-This application is an experimental scientific-computing workflow for turning a DNA sequence into a structural visualization, a two-dimensional molecular pattern, candidate resonator modes, and audio signals. It is deliberately designed to distinguish **molecular geometry**, **mathematical sonification**, and **physical cymatics**.
-
-## Scientific objective
-
-The intended pipeline is:
+This application explores a reproducible computational pipeline:
 
 ```text
 DNA sequence
-   ↓
-sequence provenance / assembly / transcript selection
-   ↓
-3D molecular coordinates
-   ↓
-atomic-coordinate alignment to the molecular axis
-   ↓
-2D atomic projection
-   ↓
-optional one-turn or helical-phase transform
-   ↓
-optional edge/nodal target extraction
-   ↓
-spatial Fourier + polar harmonic analysis
-   ↓
+    ↓
+sequence retrieval / provenance
+    ↓
+3D duplex geometry
+    ↓
+explicit heavy-atom coordinate model
+    ↓
+2D axial atomic-density projection
+    ↓
+helical folding / one-turn projection
+    ↓
+spatial + polar harmonic analysis
+    ↓
 resonator mode search
-   ↓
+    ↓
 exact physical-drive WAV
-   ↓
-musical sonification WAV
-   ↓
-(optional) physical cymatics experiment + image verification
+    ↓
+music sonification WAV
+    ↓
+optional physical cymatics image verification
 ```
 
-The application does **not** assume that a DNA sequence has a universal intrinsic audible frequency. A frequency reported by the resonator model is a property of the selected mathematical/physical resonator model and its parameters.
+The application is deliberately self-contained for sequence-to-geometry generation. **It does not require 3DNA, AmberTools, NAB, a molecular-dynamics package, or a proprietary molecular builder.**
 
-## Canonical test case
+The highest-fidelity structural path remains an experimentally determined or externally validated **PDB/mmCIF** coordinate set.
 
-The default sequence is **zebrafish hoxb1a-201**, the mature mRNA/cDNA sequence used as the canonical software test sequence. The app also provides network retrieval of the current gene package from NCBI/Ensembl/ZFIN when the runtime has Internet access.
+## Canonical test sequence
 
-The canonical sequence is kept in `dna_sources.py` so that the application remains runnable offline.
+The default sequence is zebrafish **hoxb1a-201**, 1,507 nt, retained as a reproducible canonical test case.
 
-## Sequence classes
+The sequence-retrieval tab can also fetch current genomic DNA, transcripts, CDS sequences and upstream sequence from public gene resources when Internet access is available.
 
-The retrieval interface supports:
+## Structure sources
 
-1. **Genomic DNA** — assembly-specific genomic locus, including introns and intergenic sequence inside the requested locus.
-2. **Mature mRNA/cDNA** — transcript sequence including UTRs where provided.
-3. **Protein-coding CDS** — translated coding sequence only.
-4. **Promoter/upstream** — a configurable upstream genomic window. This is an upstream sequence window, not proof that every base is a promoter.
+The application supports three paths.
 
-For gene retrieval, provenance is retained in `metadata.json`, including identifiers, assembly, chromosome/accession, coordinates, strand, transcript IDs and source URLs.
+### 1. Internal parametric heavy-atom model — default
 
-## 3D structure sources
+A pure-Python geometry builder creates an explicit set of standard nucleic-acid heavy-atom sites for both Watson-Crick strands. The model contains:
 
-The app supports three structural sources:
+- base-ring heavy atoms with standard atom names,
+- deoxyribose or ribose sugar heavy atoms,
+- phosphate and phosphate-oxygen sites,
+- explicit element identities,
+- a sequence-dependent B-DNA twist/rise component,
+- idealized A-, B-, C- and left-handed Z-form geometry presets,
+- local base inclination and handedness,
+- a globally straight helix axis to prevent artificial long-range curvature.
 
-### 1. 3DNA sequence-dependent atomic rebuild
+The model is intended for **geometry, image formation, signal analysis and experimental target generation**. It is not a force-field minimized structure, molecular-dynamics trajectory, or quantum-chemical equilibrium structure.
 
-Preferred for sequence-dependent B-DNA when 3DNA `rebuild` and the standard B-DNA templates are available.
+Hydrogens are intentionally omitted from the generated sequence-only model. Their placement depends on protonation, tautomeric state and local geometry and is not necessary for the primary transverse heavy-atom density analysis.
 
-The app writes local base-pair-step parameters in 3DNA's `Shift Slide Rise Tilt Roll Twist` order and asks `rebuild -atomic` for atomic coordinates.
+### 2. Uploaded PDB/mmCIF
 
-### 2. 3DNA atomistic fiber
+An experimental or externally validated structure can be loaded directly. The application preserves the supplied atomic coordinates and parses atom names and elements. This is the preferred route when a specific structural conformation is available.
 
-Useful for idealized A-DNA, B-DNA, C-DNA, Z-DNA and RNA conformational reference structures.
+### 3. Coarse sequence-dependent model
 
-### 3. Uploaded PDB/mmCIF
+A lightweight base-pair-step representation remains available for rapid 3D visualization. It uses the standard local descriptors shift, slide, rise, tilt, roll and twist but is not atomistic.
 
-Use this when an experimentally determined structure or a trusted model is available. The atomic coordinates in the uploaded structure are used directly for visualization and projection.
+## Why the sequence-only model is custom
 
-### 4. Built-in parametric fallback
+The project originally experimented with external sequence-to-structure builders. They added installation and platform dependencies without solving the central scientific problem: the output still had to be projected and converted into a target spatial field suitable for a calibrated resonator.
 
-When 3DNA is unavailable, the app creates a deterministic atom-site surrogate from the sequence. It is useful for visualization and software testing only. It is **not** an atomistically validated chemical structure and must not be used for energetic or quantitative chemistry conclusions.
+The current design therefore keeps the sequence-to-coordinate layer deterministic and inspectable in Python. Every modeled atom has an element and atom name, and the generated PDB can be exported for inspection.
 
-## Why the app shows two 2D images
+This is intentionally a **geometry model**, not a claim of chemical simulation.
 
-A long DNA molecule has a large axial extent compared with its ~2 nm diameter. A side projection therefore looks like a line; that is expected.
+## DNA conformational presets
 
-The app therefore shows:
+The app exposes:
 
-### Literal axial atomic-density projection
+```text
+A-DNA
+B-DNA
+C-DNA
+Z-DNA (idealized left-handed)
+A-RNA
+```
 
-All loaded atom coordinates are aligned to the best-fit molecular axis and projected orthographically onto the transverse plane. This is the closest representation to an actual camera looking down the DNA axis.
+A-DNA, B-DNA and Z-DNA use commonly reported idealized helical dimensions. C-DNA is included as an exploratory geometric preset rather than as a claim that the sequence uniquely determines a C-DNA conformation. Z-DNA is likewise an idealized left-handed geometry; a specific experimentally observed Z-DNA structure should be supplied as PDB/mmCIF when quantitative comparison is required.
 
-### Selected cymatics target
+For B-DNA, the built-in dinucleotide table modifies the local twist and rise by sequence. The global helix axis is not allowed to become a random walk from accumulated roll/tilt.
 
-Three target-source choices are available:
+## 2D molecular projection
 
-- **Axial atomic density** — the full-molecule literal projection.
-- **Single-turn axial density** — a literal projection of one helical-pitch axial slab near the center of the structure. This is useful for comparison with finite axial molecular diagrams that show a few turns rather than an entire gene-length molecule.
-- **Helical phase-folded density** — every atom is rotated by its axial helical phase before projection so successive turns are registered. This is a derived transform, not a literal camera view.
+A long gene-length DNA molecule is hundreds of nanometers long while its transverse diameter is only a few nanometers, so a conventional side projection is supposed to look like a line.
 
-The selected target can then be converted to **edge / nodal geometry** before resonator fitting. Edge extraction is useful because Chladni sand accumulates near low-displacement nodal lines, while molecular density is a positive density field rather than a displacement field.
+The application therefore produces multiple views.
 
-## Atomic projection weighting
+### Literal axial atomic density
 
-Two weighting choices are exposed:
+All modeled atoms are aligned to the molecular axis and projected orthographically onto the transverse XY plane. This is the true camera-style projection of the loaded coordinates.
 
-- **Uniform** — every atom contributes equal occupancy.
-- **Atomic mass** — each atom is weighted by its elemental mass.
+### Single-turn axial density
 
-These are deliberately labeled alternatives. They represent different observables and should not be interpreted as interchangeable physical densities.
+A one-pitch axial slab is selected and projected. This is useful for comparing the output with top-down helical illustrations.
+
+### Helical phase-folded density
+
+The axial coordinate is reduced modulo the helical pitch and the transverse coordinates are phase rotated so successive turns co-register. This is a derived signal-processing transform, not a literal camera view.
+
+### Density weighting
+
+The app can weight atoms by:
+
+```text
+Uniform
+Atomic mass
+Electron count proxy
+```
+
+These correspond to different mathematical observables. They are not interchangeable physical measurements.
+
+## Atomic target vs. cymatics target
+
+The molecular density field is not itself a mechanical displacement field.
+
+For a cymatics experiment the application can derive an edge/nodal target from the atomic density using the spatial gradient magnitude.
+
+Conceptually:
+
+```text
+atomic coordinates
+       ↓
+2D density ρ(x,y)
+       ↓
+|∇ρ(x,y)|
+       ↓
+geometric target
+```
+
+This prevents the software from claiming that molecular occupancy is literally the displacement function of a vibrating plate.
+
+## Spatial harmonic analysis
+
+The application calculates both a 2D FFT and polar angular harmonics.
+
+For an image expressed in polar coordinates:
+
+```text
+ρ(r, θ)
+```
+
+it estimates angular components:
+
+```text
+C_m(r) = integral ρ(r,θ) exp(-i m θ) dθ
+```
+
+The angular order `m` is particularly relevant for circular resonators because it corresponds to the number of nodal-diameter families.
 
 ## Resonator model
 
-The current analytical resonator is an ideal tension-dominated circular membrane. The mode shapes are based on Bessel functions:
+The built-in physical model is an ideal tension-dominated circular membrane. Its spatial modes use Bessel functions:
 
 ```text
-phi_mn(r,theta) = J_m(alpha_mn r/R) cos(m theta - phi)
+φ_mn(r,θ) = J_m(α_mn r/R) cos(mθ - φ)
 ```
 
-where `alpha_mn` is the nth zero of the mth Bessel function.
+where `α_mn` is a zero of the Bessel function of order `m` and `R` is the resonator radius.
 
-The ideal membrane frequency model is:
+The mode frequency is modeled as:
 
 ```text
-f_mn = c * alpha_mn / (2*pi*R)
+f_mn = c α_mn / (2πR)
 ```
 
-where `c` is the supplied membrane wave speed and `R` is the resonator radius.
+where `c` is the assumed transverse wave speed.
 
-This is a mathematical membrane model, not a generic formula for a steel Chladni plate. A real plate requires measured or numerically identified boundary conditions, stiffness, thickness, density, damping and actuator coupling.
+The solver searches angular order, radial order and orientation and ranks candidate modes according to spatial similarity to the target.
 
-The mode solver searches the orientation of degenerate cosine/sine angular partners so the spatial mode is compared with the target in the best orientation.
+This is an ideal resonator model. It is not a universal DNA frequency model.
 
-## Audio outputs
+## Physical frequency vs. musical frequency
 
-### Physical drive WAV
+These are now intentionally separated.
 
-The physical-drive WAV contains **exact unquantized resonator frequencies**, one candidate mode at a time. This is the file intended for a physical experiment.
+### Physical-drive WAV
 
-Do not substitute the musical WAV for the physical-drive WAV when testing a resonator.
+Contains the **exact unquantized model resonances**. Each candidate mode is driven sequentially or the best single candidate can be isolated.
+
+This is the signal intended for a real cymatics experiment.
 
 ### Musical sonification WAV
 
-The musical WAV is a creative sonification of the candidate physical frequencies. It may use musical pitch quantization and harmonics. It should **not** be expected to produce the same static Chladni figure as the physical-drive WAV.
+The same spatially derived frequency information can be mapped into a musical scale and expanded with rhythm/harmonics for creative use.
 
-A static resonant pattern is normally associated with a resonance/mode family. Driving several unrelated frequencies simultaneously generally produces a time-varying superposition rather than one stationary Chladni geometry.
+This file is **not** expected to maintain a static physical Chladni pattern because changing notes changes the spatial resonance conditions.
 
 ## Experimental verification
 
-The verification tab compares a measured cymatics image with the generated target. The software performs small translational registration and reports:
+A physical verification run should be treated as a closed-loop measurement rather than a visual analogy:
 
-- RMSE
-- Pearson spatial correlation
-- Dice overlap
-- IoU
-- 95th-percentile nodal boundary distance
-- angular-harmonic correlation
+```text
+DNA target
+   ↓
+mode solver
+   ↓
+exact frequency
+   ↓
+physical resonator
+   ↓
+sand / powder / liquid
+   ↓
+camera
+   ↓
+image registration
+   ↓
+quantitative comparison
+```
 
-These image metrics establish image similarity only. They do not prove that a DNA sequence caused a frequency, that the model is unique, or that a frequency is a property of the DNA independent of the resonator.
+The application reports:
 
-## Recommended physical experiment
+- RMSE,
+- Pearson spatial correlation,
+- Dice overlap,
+- IoU,
+- 95th percentile boundary distance,
+- angular-harmonic correlation.
 
-1. Use a single candidate resonance and the exact frequency from the physical-drive WAV.
-2. Characterize the resonator with a frequency sweep before testing the DNA target.
-3. Record the actual plate/membrane dimensions, thickness, material, mount and actuator location.
-4. Measure the physical resonance frequency independently with an accelerometer, laser vibrometer, impedance measurement, microphone or equivalent instrumentation.
-5. Photograph the resulting nodal pattern with fixed camera geometry.
-6. Register the image to the target without changing the target definition after seeing the result.
-7. Compare target and measured images.
-8. Repeat using sequence controls such as a GC-matched random sequence, shuffled sequence, reverse complement, and periodic synthetic controls.
+Similarity is evidence of pattern similarity only. It does not demonstrate causality or uniqueness.
+
+## Recommended controls
+
+A serious experiment should include:
+
+1. the target sequence,
+2. a shuffled sequence with matched length and base composition,
+3. a reverse-complement control where applicable,
+4. synthetic periodic sequences,
+5. repeat measurements at the same resonance,
+6. frequency-neighbor controls above and below the candidate.
+
+Record plate dimensions, thickness, material, mounting, actuator location, drive amplitude, drive frequency, camera geometry and environmental conditions.
 
 ## Installation
 
-### Basic installation
+Python 3.11+ is recommended.
 
 ```bash
 python -m venv .venv
 ```
 
-Windows:
+Windows PowerShell:
 
 ```powershell
 .venv\\Scripts\\activate
 ```
 
-Linux/macOS:
+Linux/macOS/WSL:
 
 ```bash
 source .venv/bin/activate
 ```
 
-Then:
+Install:
 
 ```bash
 pip install -r requirements.txt
+```
+
+Run:
+
+```bash
 python app.py
 ```
 
-Open the local Gradio URL shown by the terminal.
+Windows:
 
-### Optional 3DNA installation
+```text
+launch_windows.bat
+```
 
-Read `INSTALL_3DNA.txt`.
+Linux/macOS/WSL:
 
-3DNA is optional. The fallback keeps the app functional, but the fallback structure is explicitly non-quantitative.
+```bash
+./launch_linux_mac.sh
+```
 
-## Test suite
+## Dependencies
+
+Required Python packages are intentionally limited to open-source scientific and UI libraries:
+
+- Gradio,
+- NumPy,
+- SciPy,
+- pandas,
+- Plotly,
+- Matplotlib,
+- SoundFile,
+- BeautifulSoup4,
+- Biopython.
+
+Biopython is used only for parsing uploaded PDB/mmCIF structures. The sequence-only coordinate builder is implemented inside this repository.
+
+## Testing
 
 Run:
 
@@ -209,50 +313,52 @@ python tests.py
 
 The tests cover:
 
-- DNA validation
-- canonical hoxb1a-201 length and sequence fingerprint
-- sequence retrieval package structure
-- PDB/atomic coordinate handling
-- backbone-informed axis alignment
-- literal and phase-folded atomic projections
-- single-turn projection behavior
-- nodal/edge target generation
-- 3DNA parameter file generation
-- circular membrane mode generation and ranking
-- physical and musical WAV generation
-- polar harmonics
-- image registration metrics
+- sequence validation,
+- hoxb1a-201 canonical sequence length and sentinel bases,
+- gene-sequence package creation,
+- 3D geometry construction,
+- artificial-bend prevention,
+- parametric heavy-atom generation,
+- PDB writing,
+- atomic 2D projection modes,
+- density weighting,
+- circular resonator modes,
+- physical-drive audio,
+- musical sonification,
+- polar harmonic analysis,
+- cymatics registration metrics.
 
-## Reproducibility
-
-Every analysis bundle contains an `analysis.json` file with the sequence hash, structure source, structural metadata, projection definition, resonator parameters, candidate modes and event timing.
-
-For an actual experimental campaign, archive the entire generated ZIP together with the raw camera and sensor data.
+No external molecular builder is needed for the test suite.
 
 ## Accuracy hierarchy
 
-From strongest to weakest sequence-to-coordinate provenance:
+For a specific physical conformation:
 
 ```text
-Experimental / trusted PDB or mmCIF structure
+experimentally determined / validated PDB or mmCIF
         ↓
-3DNA atomic sequence-dependent reconstruction
+internal parametric heavy-atom geometry
         ↓
-3DNA idealized conformational fiber
-        ↓
-Built-in parametric atom-site surrogate
+coarse sequence-dependent geometry
 ```
 
-And separately, for the wave problem:
+The internal model should be interpreted as a reproducible **coordinate hypothesis** for the image-generation experiment, not as evidence that those exact atom coordinates exist in vivo.
 
-```text
-Measured resonator + calibrated modal basis
-        ↓
-FEM / numerical eigenmode model matched to experiment
-        ↓
-Ideal circular membrane analytical model
-        ↓
-Simple frequency-to-note sonification
-```
+## Output bundle
 
-The application is most scientifically defensible when both sides of that chain are near the top.
+Each analysis creates a ZIP containing:
+
+- atomic PDB,
+- literal axial projection PNG,
+- selected cymatics target PNG,
+- FFT spectrum PNG,
+- resonator reconstruction PNG,
+- physical-drive WAV,
+- best-mode WAV,
+- musical WAV,
+- candidate-mode CSV,
+- polar-harmonic CSV,
+- spatial-frequency CSV,
+- `analysis.json` with all parameters and hashes.
+
+The objective is complete reproducibility: the same sequence, projection parameters and resonator parameters should recreate the same computational target.

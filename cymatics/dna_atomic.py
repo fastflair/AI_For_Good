@@ -2,23 +2,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import math
-import os
 from pathlib import Path
 import re
-import shutil
-import subprocess
-import tempfile
 from typing import Iterable
 
 import numpy as np
 from scipy.ndimage import gaussian_filter
+
 try:
     from Bio.PDB import MMCIFParser, PDBParser
-except ImportError:  # optional until an uploaded PDB/mmCIF is used
+except ImportError:  # Optional: only required for uploaded PDB/mmCIF files.
     MMCIFParser = PDBParser = None
 
 BASES = set("ACGT")
 ELEMENT_MASS = {"H": 1.008, "C": 12.011, "N": 14.007, "O": 15.999, "P": 30.974, "S": 32.06}
+ELEMENT_Z = {"H": 1.0, "C": 6.0, "N": 7.0, "O": 8.0, "P": 15.0, "S": 16.0}
 
 
 class AtomicStructureError(RuntimeError):
@@ -53,27 +51,119 @@ class AtomicProjection:
     mode: str
 
 
-def find_3dna_fiber(explicit_path: str | None = None) -> str | None:
-    candidates: list[str] = []
-    if explicit_path:
-        p = Path(explicit_path).expanduser()
-        if p.is_dir():
-            candidates += [str(p / "bin" / "fiber"), str(p / "fiber"), str(p / "bin" / "fiber.exe"), str(p / "fiber.exe")]
-        else:
-            candidates.append(str(p))
-    x3dna = os.environ.get("X3DNA")
-    if x3dna:
-        root = Path(x3dna).expanduser()
-        candidates += [str(root / "bin" / "fiber"), str(root / "bin" / "fiber.exe"), str(root / "fiber"), str(root / "fiber.exe")]
-    path = shutil.which("fiber") or shutil.which("fiber.exe")
-    if path:
-        candidates.append(path)
-    for c in candidates:
-        p = Path(c)
-        if p.exists() and os.access(p, os.X_OK):
-            return str(p)
-    return None
+# Reference geometric presets. These describe idealized conformational families;
+# the internal sequence-dependent model modifies B-DNA local twist/rise only.
+# A-DNA / B-DNA / Z-DNA values are consistent with commonly reported ranges;
+# C-DNA is retained as a geometric exploratory preset because it is less common.
+DNA_FORM_PRESETS = {
+    "B-DNA": {
+        "rise_A": 3.38,
+        "twist_deg": 36.0,
+        "radius_A": 10.0,
+        "handedness": 1.0,
+        "base_inclination_deg": -6.0,
+    },
+    "A-DNA": {
+        "rise_A": 2.81,
+        "twist_deg": 32.7,
+        "radius_A": 11.5,
+        "handedness": 1.0,
+        "base_inclination_deg": 13.0,
+    },
+    "C-DNA": {
+        "rise_A": 3.31,
+        "twist_deg": 39.5,
+        "radius_A": 9.5,
+        "handedness": 1.0,
+        "base_inclination_deg": 0.0,
+    },
+    "Z-DNA": {
+        "rise_A": 3.70,
+        "twist_deg": -30.0,
+        "radius_A": 9.0,
+        "handedness": -1.0,
+        "base_inclination_deg": -7.0,
+    },
+    "A-RNA": {
+        "rise_A": 2.81,
+        "twist_deg": 32.7,
+        "radius_A": 11.5,
+        "handedness": 1.0,
+        "base_inclination_deg": 13.0,
+    },
+}
 
+
+# The atom templates below are intentionally geometric rather than a force-field
+# topology. They use standard nucleic-acid atom names and elements, with local
+# coordinates arranged to reproduce the major molecular features needed by the
+# projection: planar bases, ribose/deoxyribose rings, and phosphate backbones.
+# Hydrogens are omitted because proton positions depend strongly on protonation,
+# tautomer and local geometry and do not materially improve the axial heavy-atom
+# pattern at this resolution.
+BASE_TEMPLATES = {
+    "A": [
+        ("N9", "N", -1.20, 0.00), ("C8", "C", 0.00, 1.25), ("N7", "N", 1.15, 0.70),
+        ("C5", "C", 0.55, -0.45), ("C6", "C", -0.55, -0.85), ("N6", "N", -1.55, -1.35),
+        ("N1", "N", -1.05, -1.95), ("C2", "C", 0.00, -2.25), ("N3", "N", 1.05, -1.70),
+        ("C4", "C", 1.35, -0.55),
+    ],
+    "G": [
+        ("N9", "N", -1.20, 0.00), ("C8", "C", 0.00, 1.25), ("N7", "N", 1.15, 0.70),
+        ("C5", "C", 0.55, -0.45), ("C6", "C", -0.55, -0.85), ("O6", "O", -1.55, -1.35),
+        ("N1", "N", -1.05, -1.95), ("C2", "C", 0.00, -2.25), ("N2", "N", 1.10, -1.95),
+        ("N3", "N", 1.05, -0.80), ("C4", "C", 1.35, -0.25),
+    ],
+    "C": [
+        ("N1", "N", -1.00, -1.45), ("C2", "C", 0.00, -2.15), ("O2", "O", 1.15, -1.75),
+        ("N3", "N", 1.15, -0.55), ("C4", "C", 0.35, 0.35), ("C5", "C", -0.85, 0.10),
+        ("C6", "C", -1.35, -0.75),
+    ],
+    "T": [
+        ("N1", "N", -1.00, -1.45), ("C2", "C", 0.00, -2.15), ("O2", "O", 1.15, -1.75),
+        ("N3", "N", 1.15, -0.55), ("C4", "C", 0.35, 0.35), ("O4", "O", 1.35, 0.95),
+        ("C5", "C", -0.85, 0.10), ("C7", "C", -1.65, 1.05), ("C6", "C", -1.35, -0.75),
+    ],
+    "U": [
+        ("N1", "N", -1.00, -1.45), ("C2", "C", 0.00, -2.15), ("O2", "O", 1.15, -1.75),
+        ("N3", "N", 1.15, -0.55), ("C4", "C", 0.35, 0.35), ("O4", "O", 1.35, 0.95),
+        ("C5", "C", -0.85, 0.10), ("C6", "C", -1.35, -0.75),
+    ],
+}
+
+# Approximate deoxyribose heavy-atom template. Coordinates are in a local plane
+# whose x direction points radially outward from the helix axis and y is tangential.
+# The small z offsets mimic sugar puckering instead of forcing everything into one plane.
+SUGAR_TEMPLATE = [
+    ("C1'", "C", -1.70, 0.00, 0.25),
+    ("O4'", "O", -0.65, 1.05, -0.15),
+    ("C4'", "C", 0.65, 0.75, 0.20),
+    ("C3'", "C", 1.15, -0.55, -0.20),
+    ("O3'", "O", 1.85, -1.35, -0.05),
+    ("C2'", "C", 0.00, -1.55, 0.30),
+    ("C5'", "C", -1.05, 1.75, 0.40),
+]
+
+RNA_SUGAR_TEMPLATE = [
+    ("C1'", "C", -1.70, 0.00, 0.25),
+    ("O4'", "O", -0.65, 1.05, -0.15),
+    ("C4'", "C", 0.65, 0.75, 0.20),
+    ("C3'", "C", 1.15, -0.55, -0.20),
+    ("O3'", "O", 1.85, -1.35, -0.05),
+    ("C2'", "C", 0.00, -1.55, 0.30),
+    ("O2'", "O", 0.80, -2.35, 0.10),
+    ("C5'", "C", -1.05, 1.75, 0.40),
+]
+
+PHOSPHATE_TEMPLATE = [
+    ("P", "P", 0.00, 0.00, 0.00),
+    ("O1P", "O", 1.15, 0.85, 0.35),
+    ("O2P", "O", -1.05, 0.95, -0.35),
+    ("O5P", "O", -0.10, -1.25, 0.20),
+]
+
+
+# --------------------------- structure loading ---------------------------
 
 def _parse_pdb_text(text: str) -> AtomicStructure:
     coords: list[list[float]] = []
@@ -101,8 +191,7 @@ def _parse_pdb_text(text: str) -> AtomicStructure:
         residues.append(res_name)
     if not coords:
         raise AtomicStructureError("No ATOM/HETATM coordinates were found in the PDB file.")
-    arr = np.asarray(coords, dtype=float)
-    return AtomicStructure(arr, tuple(elements), tuple(names), tuple(residues), "PDB/mmCIF", "Unknown", {})
+    return AtomicStructure(np.asarray(coords, dtype=float), tuple(elements), tuple(names), tuple(residues), "PDB/mmCIF upload", "Unknown", {})
 
 
 def load_structure(path: str | Path) -> AtomicStructure:
@@ -118,8 +207,7 @@ def load_structure(path: str | Path) -> AtomicStructure:
         parser = PDBParser(QUIET=True)
         structure = parser.get_structure("uploaded", str(p))
         return _biopython_to_atomic(structure)
-    text = p.read_text(encoding="utf-8", errors="replace")
-    return _parse_pdb_text(text)
+    return _parse_pdb_text(p.read_text(encoding="utf-8", errors="replace"))
 
 
 def _biopython_to_atomic(structure) -> AtomicStructure:
@@ -129,7 +217,8 @@ def _biopython_to_atomic(structure) -> AtomicStructure:
         if c.shape != (3,) or not np.all(np.isfinite(c)):
             continue
         element = (atom.element or "C").upper()
-        if element == "D": element = "H"
+        if element == "D":
+            element = "H"
         residue = atom.get_parent()
         resname = str(residue.get_resname()).strip() or "?"
         coords.append(c.tolist())
@@ -142,79 +231,160 @@ def _biopython_to_atomic(structure) -> AtomicStructure:
 
 
 def load_pdb(path: str | Path) -> AtomicStructure:
-    """Backward-compatible alias."""
     return load_structure(path)
 
 
-def generate_3dna_fiber(
-    sequence: str,
-    dna_form: str = "B-DNA",
-    executable: str | None = None,
-    timeout_s: int = 180,
-) -> AtomicStructure:
-    seq = re.sub(r"\s+", "", sequence).upper()
-    if not seq or any(c not in BASES for c in seq):
-        raise AtomicStructureError("3DNA input sequence must contain A/C/G/T only.")
-    if len(seq) > 5000:
-        raise AtomicStructureError("3DNA atomistic mode is limited to 5,000 bp for interactive use.")
+# --------------------------- sequence -> geometry ---------------------------
 
-    fiber = find_3dna_fiber(executable)
-    if fiber is None:
-        raise AtomicStructureError(
-            "3DNA 'fiber' executable was not found. Install 3DNA and set X3DNA or provide the executable path."
-        )
+def _orthonormal_frame(theta_rad: float, inclination_deg: float = 0.0, handedness: float = 1.0) -> np.ndarray:
+    """Build a local base-plane frame without accumulating global curvature."""
+    ct, st = math.cos(theta_rad), math.sin(theta_rad)
+    radial = np.array([ct, st, 0.0], dtype=float)
+    tangential = np.array([-handedness * st, handedness * ct, 0.0], dtype=float)
+    z = np.array([0.0, 0.0, 1.0], dtype=float)
+    a = math.radians(float(inclination_deg))
+    # Rotate the base-plane normal away from z by a small inclination around tangent.
+    normal = math.cos(a) * z + math.sin(a) * radial
+    xaxis = radial
+    yaxis = np.cross(normal, xaxis)
+    yaxis /= max(np.linalg.norm(yaxis), 1e-12)
+    normal /= max(np.linalg.norm(normal), 1e-12)
+    return np.column_stack([xaxis, yaxis, normal])
 
-    switches = {"A-DNA": ["-a"], "B-DNA": ["-b"], "C-DNA": ["-c"], "Z-DNA": ["-z"], "A-RNA": ["-rna"]}
-    if dna_form not in switches:
-        raise AtomicStructureError(f"Unsupported 3DNA fiber form: {dna_form}")
 
-    with tempfile.TemporaryDirectory(prefix="dna_cymatics_3dna_") as td:
-        out = Path(td) / "fiber.pdb"
-        cmd = [fiber, *switches[dna_form], f"-seq={seq}", str(out)]
-        try:
-            completed = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s, check=False)
-        except OSError as exc:
-            raise AtomicStructureError(f"Could not execute 3DNA fiber: {exc}") from exc
-        if completed.returncode != 0:
-            msg = (completed.stderr or completed.stdout or "3DNA fiber failed").strip()
-            raise AtomicStructureError(f"3DNA fiber failed (exit {completed.returncode}): {msg[-1200:]}")
-        if not out.exists():
-            # Some 3DNA builds may normalize the extension/name. Find the first PDB in the temp directory.
-            pdbs = list(Path(td).glob("*.pdb"))
-            if len(pdbs) == 1:
-                out = pdbs[0]
-        if not out.exists():
-            raise AtomicStructureError("3DNA completed without producing a PDB output file.")
-        parsed = load_structure(out)
+def _canonical_parameters(sequence: str, dna_form: str, step_df=None) -> tuple[np.ndarray, np.ndarray]:
+    preset = DNA_FORM_PRESETS[dna_form]
+    n = len(sequence)
+    twists = np.full(max(0, n - 1), float(preset["twist_deg"]), dtype=float)
+    rises = np.full(max(0, n - 1), float(preset["rise_A"]), dtype=float)
+    # Sequence-dependent local parameters are meaningful for B-DNA in this model.
+    if dna_form == "B-DNA" and step_df is not None and len(step_df) == n - 1:
+        twists = np.asarray(step_df["twist"], dtype=float)
+        rises = np.asarray(step_df["rise"], dtype=float)
+    return twists, rises
+
+
+def build_parametric_atomic_dna(dna_structure, dna_form: str = "B-DNA") -> AtomicStructure:
+    """Generate an explicit sequence-derived heavy-atom coordinate model in pure Python.
+
+    This is a deterministic geometry builder, not a force-field or quantum model.
+    It creates standard nucleotide heavy-atom names for both Watson-Crick strands,
+    using local base, sugar and phosphate templates placed along an idealized helix.
+    It is designed for spatial projection, visualization and inverse-wave experiments.
+    Experimental PDB/mmCIF coordinates remain the preferred route for quantitative
+    structural chemistry.
+    """
+    if dna_form in {"Z-DNA-like (left-handed B reference)", "Z-DNA (idealized left-handed)"}:
+        dna_form = "Z-DNA"
+    if dna_form not in DNA_FORM_PRESETS:
+        raise AtomicStructureError(f"Unsupported internal conformation: {dna_form}")
+
+    seq = str(dna_structure.sequence).upper()
+    if not seq or any(b not in BASES for b in seq):
+        raise AtomicStructureError("Sequence must contain A/C/G/T only.")
+
+    preset = DNA_FORM_PRESETS[dna_form]
+    twists, rises = _canonical_parameters(seq, dna_form, getattr(dna_structure, "step_df", None))
+    n = len(seq)
+    theta_deg = np.zeros(n, dtype=float)
+    z_A = np.zeros(n, dtype=float)
+    for i in range(1, n):
+        theta_deg[i] = theta_deg[i - 1] + float(twists[i - 1])
+        z_A[i] = z_A[i - 1] + float(rises[i - 1])
+
+    # A small transverse displacement field retains the local sequence-dependent
+    # geometry without permitting roll/tilt to produce an artificial macroscopic bend.
+    # Keep sequence-dependent shift/slide local. Accumulating these small values
+    # over hundreds of base pairs would create an unphysical transverse walk.
+    offset_x = np.zeros(n, dtype=float)
+    offset_y = np.zeros(n, dtype=float)
+    if dna_form == "B-DNA" and getattr(dna_structure, "step_df", None) is not None:
+        for i, row in dna_structure.step_df.iterrows():
+            offset_x[i + 1] = 0.35 * float(row.get("shift", 0.0))
+            offset_y[i + 1] = 0.35 * float(row.get("slide", 0.0))
+
+    comp = {"A": "T", "T": "A", "C": "G", "G": "C"}
+    points: list[np.ndarray] = []
+    elements: list[str] = []
+    names: list[str] = []
+    residues: list[str] = []
+
+    def add(atom_xyz, element: str, atom_name: str, residue: str) -> None:
+        points.append(np.asarray(atom_xyz, dtype=float))
+        elements.append(element)
+        names.append(atom_name)
+        residues.append(residue)
+
+    # Convert local (radial, tangential, axial) coordinates into global XYZ.
+    def place(frame: np.ndarray, origin: np.ndarray, q: Iterable[float]) -> np.ndarray:
+        return origin + frame @ np.asarray(q, dtype=float)
+
+    for i, base in enumerate(seq):
+        theta = math.radians(float(theta_deg[i]))
+        frame = _orthonormal_frame(theta, float(preset["base_inclination_deg"]), float(preset["handedness"]))
+        axis_center = np.array([float(offset_x[i]), float(offset_y[i]), float(z_A[i])], dtype=float)
+
+        # Z-DNA has alternating local glycosidic orientation. We mimic the principal
+        # syn/anti alternation geometrically without claiming a full Z-DNA force-field model.
+        for strand_index, b in enumerate((base, comp[base])):
+            strand_sign = 1.0 if strand_index == 0 else -1.0
+            display_base = ("U" if dna_form == "A-RNA" and b == "T" else b)
+            radial_center = strand_sign * float(preset["radius_A"] * 0.40)
+            base_origin = axis_center + frame[:, 0] * radial_center
+
+            base_flip = 1.0
+            if dna_form == "Z-DNA" and b in {"G", "C"}:
+                base_flip = -1.0 if (i % 2 == 0 and b == "G") or (i % 2 == 1 and b == "C") else 1.0
+            for atom_name, element, x, y in BASE_TEMPLATES[display_base]:
+                qx = x * base_flip
+                qy = y
+                add(place(frame, base_origin, (qx, qy, 0.0)), element, atom_name, f"{display_base}{i+1:04d}")
+
+            # Sugar sits between the base and phosphate backbone. RNA receives O2'.
+            sugar_origin = axis_center + frame[:, 0] * (strand_sign * 5.8) + frame[:, 2] * 0.0
+            sugar_template = RNA_SUGAR_TEMPLATE if dna_form == "A-RNA" else SUGAR_TEMPLATE
+            for atom_name, element, x, y, zz in sugar_template:
+                add(place(frame, sugar_origin, (x * 0.72, y * 0.72, zz)), element, atom_name, f"{display_base}{i+1:04d}")
+
+            # Phosphate is placed on the outer backbone, slightly advanced along z.
+            phosphate_origin = axis_center + frame[:, 0] * (strand_sign * 9.6) + frame[:, 2] * (0.9 if strand_sign > 0 else -0.9)
+            for atom_name, element, x, y, zz in PHOSPHATE_TEMPLATE:
+                add(place(frame, phosphate_origin, (x * 0.85, y * 0.85, zz)), element, atom_name, f"{b}{i+1:04d}")
+
+    atoms = np.vstack(points) if points else np.empty((0, 3), dtype=float)
     return AtomicStructure(
-        parsed.atoms,
-        parsed.elements,
-        parsed.names,
-        parsed.residues,
-        "3DNA fiber",
+        atoms,
+        tuple(elements),
+        tuple(names),
+        tuple(residues),
+        "Internal sequence-derived parametric heavy-atom model",
         dna_form,
-        {"3dna_executable": fiber, "sequence_length_bp": str(len(seq)), "command": " ".join(cmd)},
+        {
+            "generator": "pure-python-parametric-nucleic-acid-geometry",
+            "sequence_length_bp": str(n),
+            "atom_scope": "heavy atoms only; hydrogens omitted",
+            "model_status": "geometry reference for visualization/projection; not force-field minimized",
+            "sequence_dependence": "B-DNA uses local twist/rise and small shift/slide modulation from the built-in dinucleotide model",
+            "macroscopic_axis": "kept straight; local inclination/handedness do not accumulate into global curvature",
+        },
     )
 
 
-def pca_align_axis(points: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Align coordinates to a deterministic principal axis.
 
-    The returned coordinates use an orthonormal basis [u, v, axis]. The sign
-    of the principal axis is canonicalized for reproducibility.
-    """
+# --------------------------- alignment and projection ---------------------------
+
+def pca_align_axis(points: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     p = np.asarray(points, dtype=float)
+    if p.ndim != 2 or p.shape[1] != 3 or len(p) < 3:
+        raise AtomicStructureError("At least three Nx3 coordinates are required for alignment.")
     center = p.mean(axis=0)
     centered = p - center
     _, _, vt = np.linalg.svd(centered, full_matrices=False)
     axis = vt[0]
-    # Canonicalize sign to make results reproducible.
     k = int(np.argmax(np.abs(axis)))
     if axis[k] < 0:
         axis = -axis
     u = vt[1]
-    v = vt[2]
-    # Make a right-handed orthonormal basis.
     v = np.cross(axis, u)
     v /= max(np.linalg.norm(v), 1e-15)
     u = np.cross(v, axis)
@@ -225,22 +395,13 @@ def pca_align_axis(points: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarr
 
 
 def _axis_reference_points(structure: AtomicStructure) -> np.ndarray:
-    """Return the most structure-specific points available for helix-axis fitting.
-
-    Phosphorus atoms are preferred for nucleic-acid structures because they are
-    distributed along the two phosphate backbones. For generic uploaded structures
-    without P atoms, all atoms are used.
-    """
     p = np.asarray(structure.atoms, dtype=float)
     elem = np.asarray(structure.elements, dtype=object)
     p_atoms = p[elem == "P"]
-    if len(p_atoms) >= 4:
-        return p_atoms
-    return p
+    return p_atoms if len(p_atoms) >= 4 else p
 
 
 def align_atomic_structure(structure: AtomicStructure) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Align all atoms using a backbone-informed principal molecular axis."""
     ref = _axis_reference_points(structure)
     if len(ref) < 3:
         raise AtomicStructureError("At least three atomic coordinates are required for alignment.")
@@ -249,13 +410,7 @@ def align_atomic_structure(structure: AtomicStructure) -> tuple[np.ndarray, np.n
     return aligned, center, basis
 
 
-def estimate_helical_pitch_A(step_df=None, default_A: float = 34.0) -> float:
-    """Estimate helical pitch from mean local rise and twist.
-
-    pitch = rise * 360 / twist. This is a geometric estimate and is only used
-    for the explicit phase-folded visualization; it is not a measured material
-    property.
-    """
+def estimate_helical_pitch_A(step_df=None, default_A: float = 33.8) -> float:
     if step_df is None or len(step_df) == 0:
         return float(default_A)
     rise = float(np.nanmean(np.asarray(step_df["rise"], dtype=float)))
@@ -279,76 +434,29 @@ def _phase_fold(points_aligned: np.ndarray, pitch_A: float) -> np.ndarray:
     return p
 
 
-def select_axial_window(
-    structure: AtomicStructure,
-    window_A: float,
-    center_fraction: float = 0.5,
-) -> AtomicStructure:
-    """Return atoms inside an axial slab of a molecular structure.
-
-    The function is useful for viewing a single helical turn or a short structural
-    repeat. Unlike phase folding, this is an actual subset of the coordinates.
-    ``center_fraction`` is the fractional position along the molecular axis.
-    """
-    if window_A <= 0:
-        raise ValueError("window_A must be positive")
-    if not 0.0 <= center_fraction <= 1.0:
-        raise ValueError("center_fraction must be in [0, 1]")
-    aligned, center, basis = align_atomic_structure(structure)
-    z = aligned[:, 2]
-    z0 = float(z.min() + center_fraction * (z.max() - z.min()))
-    mask = np.abs(z - z0) <= float(window_A) / 2.0
-    if int(mask.sum()) < 4:
-        raise AtomicStructureError("Axial window contains too few atoms; increase the window size.")
-    atoms_local = aligned[mask]
-    # Reconstruct original-coordinate representation so downstream code can align it again.
-    atoms_original = (atoms_local @ basis) + center
-    elems = tuple(np.asarray(structure.elements, dtype=object)[mask].tolist())
-    names = tuple(np.asarray(structure.names, dtype=object)[mask].tolist())
-    residues = tuple(np.asarray(structure.residues, dtype=object)[mask].tolist())
-    return AtomicStructure(
-        atoms_original, elems, names, residues,
-        f"{structure.source} — axial window", structure.dna_form,
-        {**structure.metadata, "axial_window_A": f"{window_A:.6f}", "center_fraction": f"{center_fraction:.6f}"},
-    )
-
-
 def atomic_density_projection(
     structure: AtomicStructure,
     mode: str = "Axial atomic density",
     size: int = 512,
     blur_A: float = 0.35,
     point_weighting: str = "Uniform",
-    helical_pitch_A: float = 34.0,
+    helical_pitch_A: float = 33.8,
 ) -> AtomicProjection:
-    """Project every atom into a calibrated 2-D molecular density image.
-
-    Modes:
-      * Axial atomic density: literal orthographic view looking down the best-fit
-        molecular axis.
-      * Helical phase-folded density: an explicitly derived visualization that
-        removes axial periodicity and co-registers successive turns. It is not a
-        literal camera projection.
-      * Single-turn axial density: literal projection of a one-pitch axial slab
-        centered within the structure. This is the closest sequence-derived view
-        to the finite helical cross-sections shown in structural diagrams.
-      * Best-fit axial PCA: backward-compatible alias for the literal axial view.
-
-    Atom weighting is intentionally explicit because uniform occupancy, atomic
-    mass and other contrast models represent different physical observables.
-    """
+    """Render every modeled atom into a square 2-D density field."""
     if not 64 <= int(size) <= 2048:
         raise ValueError("Atomic projection size must be between 64 and 2048 pixels.")
     if blur_A < 0:
         raise ValueError("blur_A must be non-negative.")
-    if point_weighting not in {"Uniform", "Atomic mass"}:
+    if point_weighting not in {"Uniform", "Atomic mass", "Electron count proxy"}:
         raise ValueError("Unsupported atom weighting")
-    if mode not in {"Axial atomic density", "Helical phase-folded density", "Single-turn axial density", "Best-fit axial PCA"}:
+    valid_modes = {"Axial atomic density", "Helical phase-folded density", "Single-turn axial density", "Best-fit axial PCA"}
+    if mode not in valid_modes:
         raise ValueError("Unsupported atomic projection mode")
 
     aligned, _, _ = align_atomic_structure(structure)
     if mode == "Helical phase-folded density":
         p = _phase_fold(aligned, helical_pitch_A)
+        elems = np.asarray(structure.elements, dtype=object)
     elif mode == "Single-turn axial density":
         z = aligned[:, 2]
         z_mid = 0.5 * (float(z.min()) + float(z.max()))
@@ -356,12 +464,15 @@ def atomic_density_projection(
         if int(mask.sum()) < 4:
             raise AtomicStructureError("The selected one-turn window contains too few atoms.")
         p = aligned[mask]
+        elems = np.asarray(structure.elements, dtype=object)[mask]
     else:
         p = aligned
+        elems = np.asarray(structure.elements, dtype=object)
 
     xy = p[:, :2]
     lo = xy.min(axis=0); hi = xy.max(axis=0)
     span = np.maximum(hi - lo, 1e-9)
+    # Use a symmetric canvas so the axial molecular cross-section is not stretched.
     side = float(max(span) * 1.10)
     center = 0.5 * (lo + hi)
     lo2 = center - side / 2.0
@@ -369,14 +480,14 @@ def atomic_density_projection(
 
     if point_weighting == "Uniform":
         weights = np.ones(len(xy), dtype=float)
+    elif point_weighting == "Atomic mass":
+        weights = np.asarray([ELEMENT_MASS.get(e, 12.0) for e in elems], dtype=float)
     else:
-        weights = np.asarray([ELEMENT_MASS.get(e, 12.0) for e in structure.elements], dtype=float)
+        weights = np.asarray([ELEMENT_Z.get(e, 6.0) for e in elems], dtype=float)
 
     edges_x = np.linspace(lo2[0], hi2[0], int(size) + 1)
     edges_y = np.linspace(lo2[1], hi2[1], int(size) + 1)
-    image, _, _ = np.histogram2d(
-        xy[:, 1], xy[:, 0], bins=(edges_y, edges_x), weights=weights
-    )
+    image, _, _ = np.histogram2d(xy[:, 1], xy[:, 0], bins=(edges_y, edges_x), weights=weights)
     if blur_A > 0:
         px_A = side / int(size)
         sigma_px = max(0.20, float(blur_A) / max(px_A, 1e-12))
@@ -386,8 +497,7 @@ def atomic_density_projection(
     if peak > 0:
         image /= peak
 
-    counts = {e: structure.elements.count(e) for e in sorted(set(structure.elements))}
-    label = "X/Y transverse coordinates (Å)"
+    counts = {e: int(np.sum(elems == e)) for e in sorted(set(elems.tolist()))}
     return AtomicProjection(
         image=image,
         points_2d=xy,
@@ -402,12 +512,6 @@ def atomic_density_projection(
 
 
 def atomic_edge_target(image: np.ndarray, blur_sigma_px: float = 1.0) -> np.ndarray:
-    """Convert molecular density into a nodal-line target using gradient magnitude.
-
-    This is the preferred target for comparing against Chladni nodal lines: the
-    molecular density itself is not a displacement field, while its strong spatial
-    gradients provide a reproducible geometric feature set.
-    """
     img = np.asarray(image, dtype=float)
     if img.ndim != 2:
         raise ValueError("image must be 2-D")
@@ -426,80 +530,8 @@ def atomic_edge_target(image: np.ndarray, blur_sigma_px: float = 1.0) -> np.ndar
 
 
 def element_color_sequence(elements: Iterable[str]) -> list[str]:
-    # Plotly accepts CSS colors. Keeping this deterministic makes the 3D view reproducible.
-    colors = {"H": "lightgray", "C": "dimgray", "N": "royalblue", "O": "red", "P": "orange", "S": "yellow"}
+    colors = {"H": "lightgray", "C": "gray", "N": "royalblue", "O": "red", "P": "orange", "S": "yellow"}
     return [colors.get(e, "white") for e in elements]
-
-# Lightweight sequence-only atom-site surrogate. It is intentionally not used for
-# quantitative chemistry; it supplies base-specific heavy-atom-like sites when
-# 3DNA is unavailable so the axial-density visualization remains meaningful.
-BASE_ATOM_COUNTS = {"A": 9, "G": 10, "C": 8, "T": 9}
-BASE_RING = {
-    "C": np.array([[-2.9, -1.1], [-1.4, -2.0], [0.1, -1.1], [0.1, 0.9], [-1.4, 1.8], [-2.9, 0.7]], dtype=float),
-    "T": np.array([[-2.9, -1.1], [-1.4, -2.0], [0.1, -1.1], [0.1, 0.9], [-1.4, 1.8], [-2.9, 0.7]], dtype=float),
-    "A": np.array([[-2.8, -1.0], [-1.4, -2.0], [0.1, -1.0], [0.7, 0.5], [-0.4, 1.8], [-1.9, 1.5]], dtype=float),
-    "G": np.array([[-2.8, -1.0], [-1.4, -2.0], [0.1, -1.0], [0.7, 0.5], [-0.4, 1.8], [-1.9, 1.5]], dtype=float),
-}
-
-
-def coarse_to_atomic_surrogate(dna_structure) -> AtomicStructure:
-    """Create a deterministic straight-axis heavy-atom-like site cloud.
-
-    This fallback intentionally keeps the molecular axis straight and applies
-    the sequence's local twist/rise values. It is a visualization surrogate,
-    not a chemically validated atomistic reconstruction.
-    """
-    seq = dna_structure.sequence
-    # Build a straight helical axis so a long sequence remains a compact axial ring
-    # rather than inheriting curvature artifacts from the coarse visualization model.
-    n = len(seq)
-    cumulative_twist = np.zeros(n, dtype=float)
-    cumulative_rise = np.zeros(n, dtype=float)
-    if getattr(dna_structure, "step_df", None) is not None and not dna_structure.step_df.empty:
-        for i, row in dna_structure.step_df.iterrows():
-            cumulative_twist[int(i)] = cumulative_twist[int(i) - 1] + float(row["twist"])
-            cumulative_rise[int(i)] = cumulative_rise[int(i) - 1] + float(row["rise"])
-    else:
-        cumulative_twist[:] = np.arange(n) * 34.3
-        cumulative_rise[:] = np.arange(n) * 3.4
-
-    pts: list[np.ndarray] = []
-    elems: list[str] = []
-    names: list[str] = []
-    residues: list[str] = []
-    complement = {"A": "T", "T": "A", "C": "G", "G": "C"}
-    for i, base in enumerate(seq):
-        theta = math.radians(float(cumulative_twist[i]))
-        frame = np.array([
-            [math.cos(theta), -math.sin(theta), 0.0],
-            [math.sin(theta), math.cos(theta), 0.0],
-            [0.0, 0.0, 1.0],
-        ])
-        c = np.array([0.0, 0.0, float(cumulative_rise[i])])
-        for strand_sign, b in ((1.0, base), (-1.0, complement[base])):
-            center = c + frame @ np.array([strand_sign * 3.0, 0.0, 0.0])
-            ring = BASE_RING[b].copy()
-            if b in {"A", "G"}:
-                ring = np.vstack([ring, [1.3, 1.2]])
-            ring *= 0.95 if b in {"C", "T"} else 1.05
-            for j, (x, y) in enumerate(ring):
-                local = np.array([0.55 * x, 0.42 * y, 0.08 * math.sin(j)])
-                pts.append(center + frame @ local)
-                elems.append("N" if (j + (0 if strand_sign > 0 else 1)) % 3 == 0 else "C")
-                names.append(f"{b}_BASE_{strand_sign:+.0f}_{j}")
-                residues.append(b)
-            for k, local in enumerate(((0.0, -4.5, 0.8), (0.8, -5.4, -0.6), (-0.8, -5.4, -0.6))):
-                pts.append(center + frame @ np.asarray(local))
-                elems.append("O" if k else "C"); names.append(f"SUGAR_{strand_sign:+.0f}_{k}"); residues.append(b)
-            for k, local in enumerate(((strand_sign * 0.0, 9.3, 1.0), (strand_sign * 0.0, 10.1, 1.6), (strand_sign * 0.0, 10.2, -1.2))):
-                pts.append(c + frame @ np.asarray(local))
-                elems.append("P" if k == 0 else "O"); names.append(f"PHOS_{strand_sign:+.0f}_{k}"); residues.append(b)
-    atoms = np.vstack(pts) if pts else np.empty((0, 3))
-    return AtomicStructure(
-        atoms, tuple(elems), tuple(names), tuple(residues),
-        "Parametric straight-axis atom-site surrogate", "B-DNA",
-        {"warning": "Visualization surrogate; not atomistically validated", "axis": "straight Z"},
-    )
 
 
 def write_pdb(structure: AtomicStructure, path: str | Path) -> Path:
@@ -513,101 +545,3 @@ def write_pdb(structure: AtomicStructure, path: str | Path) -> Path:
             fh.write(f"ATOM  {i:5d} {atom_name} {res} A{i:4d}    {x:8.3f}{y:8.3f}{z:8.3f}  1.00  0.00          {element:>2}\n")
         fh.write("END\n")
     return p
-
-
-def find_3dna_tool(name: str, explicit_path: str | None = None) -> str | None:
-    root = Path(explicit_path).expanduser() if explicit_path else None
-    candidates: list[str] = []
-    roots: list[Path] = []
-    if root:
-        roots.append(root if root.is_dir() else root.parent)
-    x3dna = os.environ.get("X3DNA")
-    if x3dna:
-        roots.append(Path(x3dna).expanduser())
-    for r in roots:
-        candidates.extend([str(r / "bin" / name), str(r / "bin" / f"{name}.exe"), str(r / name), str(r / f"{name}.exe")])
-    found = shutil.which(name) or shutil.which(f"{name}.exe")
-    if found:
-        candidates.append(found)
-    for c in candidates:
-        p = Path(c)
-        if p.exists() and os.access(p, os.X_OK):
-            return str(p)
-    return None
-
-
-def write_3dna_bp_step_file(sequence: str, step_params: dict[str, dict[str, float]], path: str | Path) -> Path:
-    """Write the local-step parameter format accepted by 3DNA rebuild.
-
-    The first base is a zero-parameter anchor; each following row carries
-    Shift, Slide, Rise, Tilt, Roll, Twist for the corresponding dinucleotide.
-    """
-    seq = re.sub(r"\s+", "", sequence).upper()
-    p = Path(path)
-    with p.open("w", encoding="utf-8") as fh:
-        fh.write(f"{len(seq)} # bases\n")
-        fh.write("0 # *** local step parameters ***\n")
-        fh.write("# Shift Slide Rise Tilt Roll Twist\n")
-        fh.write(f"{seq[0]} 0.00 0.00 0.00 0.00 0.00 0.00\n")
-        for base_index in range(1, len(seq)):
-            step = seq[base_index - 1 : base_index + 1]
-            if step not in step_params:
-                raise AtomicStructureError(f"No step parameters available for {step}")
-            q = step_params[step]
-            fh.write(
-                f"{seq[base_index]} {q['shift']:.3f} {q['slide']:.3f} {q['rise']:.3f} "
-                f"{q['tilt']:.3f} {q['roll']:.3f} {q['twist']:.3f}\n"
-            )
-    return p
-
-
-def generate_3dna_sequence_dependent_atomic(
-    sequence: str,
-    step_params: dict[str, dict[str, float]],
-    dna_form: str = "B-DNA",
-    executable: str | None = None,
-    timeout_s: int = 180,
-) -> AtomicStructure:
-    """Build an all-heavy-atom sequence-dependent model through 3DNA rebuild.
-
-    For B-DNA, the standard B-DNA sugar-phosphate geometry can be installed in
-    the temporary build directory with cp_std before rebuild. The base-pair
-    geometry is generated from the supplied local step parameters.
-    """
-    seq = re.sub(r"\s+", "", sequence).upper()
-    if not seq or any(c not in BASES for c in seq):
-        raise AtomicStructureError("Sequence must contain A/C/G/T only")
-    if len(seq) > 5000:
-        raise AtomicStructureError("3DNA atomistic rebuild is limited to 5,000 bp for interactive use.")
-    if dna_form != "B-DNA":
-        raise AtomicStructureError("Sequence-dependent atomic rebuild is currently standardized to B-DNA; use fiber for A/C/Z.")
-    rebuild = find_3dna_tool("rebuild", executable)
-    if rebuild is None:
-        raise AtomicStructureError("3DNA 'rebuild' executable was not found.")
-    cp_std = find_3dna_tool("cp_std", executable)
-    with tempfile.TemporaryDirectory(prefix="dna_cymatics_rebuild_") as td:
-        root = Path(td)
-        par = write_3dna_bp_step_file(seq, step_params, root / "bp_step.par")
-        if cp_std:
-            try:
-                subprocess.run([cp_std, "BDNA"], cwd=root, capture_output=True, text=True, timeout=60, check=True)
-            except Exception:
-                # Rebuild can still create the exact base coordinates even when
-                # standard backbone setup is unavailable; metadata records that.
-                cp_std = None
-        out = root / "rebuild.pdb"
-        completed = subprocess.run([rebuild, "-atomic", str(par), str(out)], cwd=root, capture_output=True, text=True, timeout=timeout_s, check=False)
-        if completed.returncode != 0 or not out.exists():
-            msg = (completed.stderr or completed.stdout or "3DNA rebuild failed").strip()
-            raise AtomicStructureError(f"3DNA rebuild failed (exit {completed.returncode}): {msg[-1500:]}")
-        parsed = load_structure(out)
-    return AtomicStructure(
-        parsed.atoms, parsed.elements, parsed.names, parsed.residues,
-        "3DNA sequence-dependent rebuild", "B-DNA",
-        {
-            "3dna_rebuild": rebuild,
-            "cp_std_BDNA": cp_std or "unavailable",
-            "sequence_length_bp": str(len(seq)),
-            "local_step_parameter_source": "application STEP_PARAMS table",
-        },
-    )

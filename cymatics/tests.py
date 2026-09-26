@@ -10,10 +10,10 @@ from dna_atomic import (
     atomic_density_projection,
     atomic_edge_target,
     align_atomic_structure,
-    coarse_to_atomic_surrogate,
     load_structure,
     pca_align_axis,
-    write_3dna_bp_step_file,
+    build_parametric_atomic_dna,
+    DNA_FORM_PRESETS,
 )
 from dna_cymatics import (
     STEP_PARAMS,
@@ -91,7 +91,7 @@ def test_sequence_bundle_write():
 
 def test_geometry_and_atomic_projection():
     dna = build_dna_structure(SEQ)
-    atomic = coarse_to_atomic_surrogate(dna)
+    atomic = build_parametric_atomic_dna(dna, dna_form="B-DNA")
     assert atomic.n_atoms > 100
     aligned, _, _ = pca_align_axis(atomic.atoms)
     assert aligned.shape[1] == 3
@@ -110,14 +110,22 @@ def test_geometry_and_atomic_projection():
     assert np.isfinite(edges).all()
 
 
-def test_3dna_parameter_file():
-    with tempfile.TemporaryDirectory() as td:
-        path = write_3dna_bp_step_file(SEQ, STEP_PARAMS, Path(td) / "bp_step.par")
-        text = path.read_text()
-        assert "12 # bases" in text
-        assert "# Shift Slide Rise Tilt Roll Twist" in text
-        assert "A 0.00 0.00 0.00 0.00 0.00 0.00" in text.splitlines()[3]
+def test_internal_parametric_builder():
+    dna = build_dna_structure(SEQ, model="sequence-dependent")
+    for form in DNA_FORM_PRESETS:
+        atomic = build_parametric_atomic_dna(dna, dna_form=form)
+        assert atomic.n_atoms > 100
+        assert atomic.atoms.shape[1] == 3
+        assert len(atomic.elements) == atomic.n_atoms
+        assert len(atomic.names) == atomic.n_atoms
+        assert "not force-field minimized" in atomic.metadata["model_status"]
 
+    b = build_parametric_atomic_dna(dna, dna_form="B-DNA")
+    assert {"P", "O", "N", "C"}.issubset(set(b.elements))
+    assert any(name == "N9" for name in b.names)
+    assert any(name == "C1'" for name in b.names)
+    assert any(name == "C7" for name in b.names)
+    assert np.all(np.isfinite(b.atoms))
 
 def test_circular_modes_and_audio():
     field = circular_membrane_mode_field(6, 1, size=96, nodal=True)
@@ -136,7 +144,7 @@ def test_circular_modes_and_audio():
 
 def test_harmonics_and_registration():
     dna = build_dna_structure(SEQ)
-    target = atomic_density_projection(coarse_to_atomic_surrogate(dna), size=128).image
+    target = atomic_density_projection(build_parametric_atomic_dna(dna, dna_form="B-DNA"), size=128).image
     harmonics = polar_harmonic_spectrum(target, max_m=16)
     assert len(harmonics) == 17
     result = image_registration_metrics(target, np.roll(target, 2, axis=1), threshold=0.55)
@@ -147,5 +155,5 @@ def test_harmonics_and_registration():
 
 if __name__ == "__main__":
     test_sequence(); test_hoxb1a_canonical(); test_sequence_source_helpers(); test_sequence_bundle_write()
-    test_geometry_and_atomic_projection(); test_3dna_parameter_file(); test_circular_modes_and_audio(); test_harmonics_and_registration()
+    test_geometry_and_atomic_projection(); test_internal_parametric_builder(); test_circular_modes_and_audio(); test_harmonics_and_registration()
     print("All tests passed.")

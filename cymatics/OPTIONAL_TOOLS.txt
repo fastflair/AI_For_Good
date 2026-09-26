@@ -1,0 +1,20 @@
+DNA CYMATICS — OPTIONAL TOOLS
+
+The application has no required external molecular builder.
+
+1. PDB/mmCIF source data
+   Use an experimentally determined or externally validated structure whenever
+   one is available for the sequence or a close structural analogue.
+
+2. Biopython
+   Already listed in requirements.txt. It is used for PDB/mmCIF parsing and does
+   not build the sequence-only model.
+
+3. Gemmi (optional future adapter)
+   Gemmi is an open-source crystallographic/mmCIF library that could be added as
+   an alternative parser in a future release. It is not required by the current
+   build.
+
+4. Numerical acceleration
+   The current implementation uses NumPy/SciPy vectorization. No GPU or compiled
+   molecular-dynamics engine is required for the sequence-only geometry path.

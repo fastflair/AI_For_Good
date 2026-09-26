@@ -1,0 +1,6 @@
+DNA Cymatics v0.6
+Self-contained sequence-to-3D geometry build.
+No 3DNA dependency.
+No AmberTools/NAB dependency.
+Sequence-only coordinate generation is pure Python.
+PDB/mmCIF parsing uses Biopython when available.

@@ -125,12 +125,13 @@ def build_dna_structure(
     model: str = "sequence-dependent",
     backbone_radius_A: float = 10.0,
 ) -> DNA3D:
-    """Build a sequence-dependent coarse-grained dsDNA reconstruction.
+    """Build a sequence-dependent coarse-grained duplex without artificial global bending.
 
-    This is a rigid-base-pair-step reconstruction, not an atomistic molecular
-    dynamics simulation. It captures sequence-dependent local twist, roll,
-    tilt, shift, slide and rise and then places two coarse backbone loci around
-    each local base-pair frame.
+    The helical axis is propagated using twist/rise plus small step translations.
+    Local tilt/roll are recorded in the step table but are not recursively fed back
+    into the global helix-axis orientation. This keeps a long sequence from becoming
+    an unphysical random walk while still preserving the sequence-dependent local
+    geometry that is useful for visualization and the parametric atom-site model.
     """
     seq = clean_sequence(sequence)
     if model not in {"sequence-dependent", "canonical"}:
@@ -147,28 +148,22 @@ def build_dna_structure(
     for i in range(n - 1):
         step = seq[i : i + 2]
         if model == "canonical":
-            p = dict(tilt=0.0, roll=0.0, twist=34.3, shift=0.0, slide=0.0, rise=3.4)
+            p = dict(tilt=0.0, roll=0.0, twist=36.0, shift=0.0, slide=0.0, rise=3.38)
         else:
             p = STEP_PARAMS[step]
 
-        local_R = (
-            _rz(math.radians(p["twist"]))
-            @ _ry(math.radians(p["roll"]))
-            @ _rx(math.radians(p["tilt"]))
-        )
-        local_t = np.array([p["shift"], p["slide"], p["rise"]], dtype=float)
-
-        # Matrix convention: frame[i] maps local coordinates into global.
+        theta = math.radians(float(p["twist"]))
+        # Global axis frame rotates only about z. Local roll/tilt remain local
+        # descriptors rather than cumulatively tilting the entire molecule.
+        local_R = _rz(theta)
         frames[i + 1] = frames[i] @ local_R
+        local_t = np.array([p["shift"], p["slide"], p["rise"]], dtype=float)
         centers[i + 1] = centers[i] + frames[i] @ local_t
         step_rows.append({"index": i + 1, "step": step, **p})
 
     strand1 = np.zeros_like(centers)
     strand2 = np.zeros_like(centers)
     basepair_edges = np.zeros((n, 2, 3), dtype=float)
-
-    # The simple backbone radius is intentionally a visualization scale rather
-    # than an atomically reconstructed phosphate/sugar backbone.
     phase = math.radians(12.0)
     a = backbone_radius_A * np.array([math.cos(phase), math.sin(phase), 0.0])
     b = backbone_radius_A * np.array([math.cos(phase + math.pi), math.sin(phase + math.pi), 0.0])
@@ -180,7 +175,6 @@ def build_dna_structure(
 
     step_df = pd.DataFrame(step_rows)
     return DNA3D(seq, centers, strand1, strand2, basepair_edges, frames, step_df)
-
 
 def project_points(points: np.ndarray, projection: str) -> Tuple[np.ndarray, str, str]:
     p = np.asarray(points, dtype=float)

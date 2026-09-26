@@ -18,13 +18,10 @@ from dna_atomic import (
     AtomicStructureError,
     atomic_density_projection,
     atomic_edge_target,
-    coarse_to_atomic_surrogate,
+    build_parametric_atomic_dna,
     estimate_helical_pitch_A,
-    generate_3dna_fiber,
-    generate_3dna_sequence_dependent_atomic,
     load_structure,
     write_pdb,
-    find_3dna_fiber,
 )
 from dna_cymatics import (
     STEP_PARAMS,
@@ -225,42 +222,25 @@ def load_retrieved_sequence(choice, catalog):
 
 # --------------------------- main modeling pipeline ---------------------------
 
-def _make_atomic_structure(sequence: str, source: str, dna_form: str, pdb_file: str | None, x3dna_path: str | None):
+def _make_atomic_structure(sequence: str, source: str, dna_form: str, pdb_file: str | None):
     coarse = build_dna_structure(sequence, model="sequence-dependent")
     warning = ""
     if source == "Uploaded PDB/mmCIF":
         if not pdb_file:
             raise AtomicStructureError("Upload a PDB or mmCIF structure first.")
         return load_structure(pdb_file), coarse, warning
-    if source == "3DNA sequence-dependent atomic rebuild (B-DNA)":
-        try:
-            atomic = generate_3dna_sequence_dependent_atomic(sequence, STEP_PARAMS, dna_form=dna_form, executable=x3dna_path or None)
-            return atomic, coarse, warning
-        except AtomicStructureError as exc:
-            atomic = coarse_to_atomic_surrogate(coarse)
-            warning = (
-                f"3DNA sequence-dependent atomic rebuild was unavailable: {exc} "
-                "Using a parametric atom-site visualization surrogate. Do not use the surrogate for chemical measurements."
-            )
-            return atomic, coarse, warning
-    if source == "3DNA atomistic fiber":
-        try:
-            atomic = generate_3dna_fiber(sequence, dna_form=dna_form, executable=x3dna_path or None)
-            return atomic, coarse, warning
-        except AtomicStructureError as exc:
-            atomic = coarse_to_atomic_surrogate(coarse)
-            warning = (
-                f"3DNA fiber generation was unavailable: {exc} "
-                "Using a parametric atom-site visualization surrogate. Do not use the surrogate for chemical measurements."
-            )
-            return atomic, coarse, warning
-    atomic = coarse_to_atomic_surrogate(coarse)
-    warning = "Using the sequence-only atom-site surrogate; it is for visualization/geometry exploration, not chemical energetics."
-    return atomic, coarse, warning
+    if source == "Internal sequence-derived atom-site model":
+        atomic = build_parametric_atomic_dna(coarse, dna_form=dna_form)
+        warning = (
+            "Using the built-in parametric heavy-atom geometry model. It uses standard nucleic-acid atom names "
+            "and sequence-dependent B-DNA twist/rise, but it is not force-field minimized or experimentally refined."
+        )
+        return atomic, coarse, warning
+    raise AtomicStructureError(f"Unsupported structure source: {source}")
 
 
 def run_pipeline(
-    sequence, dna_model, structure_source, dna_form, pdb_file, x3dna_path,
+    sequence, dna_model, structure_source, dna_form, pdb_file,
     projection_mode, atom_weighting, projection_size, atomic_blur_A, helical_pitch_A, auto_pitch,
     target_transform, membrane_radius_mm, membrane_speed, max_angular_mode, max_radial_mode, top_modes,
     target_type, musical_quantization, physical_duration_per_mode_s, musical_duration_s, tempo_bpm,
@@ -268,7 +248,7 @@ def run_pipeline(
     try:
         seq = clean_sequence(sequence)
         coarse = build_dna_structure(seq, model=dna_model)
-        atomic, coarse_for_plot, structure_warning = _make_atomic_structure(seq, structure_source, dna_form, pdb_file, x3dna_path)
+        atomic, coarse_for_plot, structure_warning = _make_atomic_structure(seq, structure_source, dna_form, pdb_file)
         effective_pitch_A = estimate_helical_pitch_A(coarse.step_df, default_A=float(helical_pitch_A)) if bool(auto_pitch) else float(helical_pitch_A)
         literal_proj = atomic_density_projection(
             atomic, mode="Axial atomic density", size=int(projection_size), blur_A=float(atomic_blur_A),
@@ -346,7 +326,7 @@ def run_pipeline(
             plt.close(fig)
 
         payload = {
-            "software": {"version": "0.5", "application": "DNA-Cymatics"},
+            "software": {"version": "0.6", "application": "DNA-Cymatics"},
             "sequence": {"length_bp": len(seq), "sha256": __import__('hashlib').sha256(seq.encode()).hexdigest(), "model": dna_model},
             "structure": {
                 "source": atomic.source, "dna_form": atomic.dna_form, "n_atoms": atomic.n_atoms,
@@ -381,7 +361,7 @@ def run_pipeline(
 
         note_lines = [
             f"**{len(seq):,} bp** · GC **{summary['GC_percent']:.1f}%** · estimated B-style turns **{summary['estimated_turns']:.2f}**",
-            f"Atomic structure: **{atomic.source}** · **{atomic.n_atoms:,} atoms**",
+            f"3D structure: **{atomic.source}** · **{atomic.n_atoms:,} modeled heavy-atom sites**",
             f"2D reference: **literal axial atomic density** · selected target source: **{projection_mode}** · target transform: **{target_transform}**",
             f"Atomic weighting: **{atom_weighting}** · helical pitch used for folding: **{effective_pitch_A:.3f} Å**",
             f"Circular membrane: radius **{float(membrane_radius_mm):.1f} mm**, wave speed **{float(membrane_speed):.1f} m/s**",
@@ -395,7 +375,7 @@ def run_pipeline(
         ]
 
         return (
-            _plotly_atomic_3d(atomic) if structure_source != "Sequence-dependent coarse model" else _plotly_coarse_3d(coarse_for_plot),
+            _plotly_atomic_3d(atomic),
             _image_plot(literal_proj.image, "Literal axial atomic-density projection", cmap="magma", xlabel="Å", ylabel="Å"),
             _image_plot(target, f"Cymatics target — {projection_mode} + {target_transform}", cmap="magma", xlabel="normalized X", ylabel="normalized Y"),
             _image_plot(spectrum, "Spatial Fourier spectrum", cmap="viridis"),
@@ -436,12 +416,6 @@ def verify_cymatics(dna_reference, measured_image, threshold):
         raise gr.Error(str(exc)) from exc
 
 
-def three_dna_status(path):
-    exe = find_3dna_fiber(path or None)
-    if exe:
-        return f"✅ 3DNA fiber found: `{exe}`"
-    return "⚠️ 3DNA fiber not found. The app will use the documented sequence-only atom-site surrogate unless you upload a structure."
-
 
 with gr.Blocks(title="DNA → Cymatics → Music") as demo:
     gr.Markdown(
@@ -452,7 +426,7 @@ This research application now separates three different things that should not b
 
 **(1) molecular structure**, **(2) a 2D target pattern derived from molecular coordinates**, and **(3) a physical resonator response**.
 
-The canonical sequence is **zebrafish hoxb1a-201**, 1,507 nt. The default atomic path uses a 3DNA fiber model when 3DNA is installed; otherwise an explicitly labeled parametric atom-site surrogate is used. A real PDB/mmCIF structure can also be uploaded.
+The canonical sequence is **zebrafish hoxb1a-201**, 1,507 nt. The default sequence-only structure path is a **pure-Python parametric heavy-atom geometry model**. It requires no external molecular builder. A real PDB/mmCIF structure can be uploaded when experimentally determined coordinates are available.
 
 > A literal side projection of a long DNA molecule is expected to be line-like. The molecular target used for cymatics is instead an **axial atomic-density projection** (or an explicitly labeled helical phase-folded projection). This is analogous to the axial molecular views used in structural DNA work.
         """
@@ -478,21 +452,19 @@ The canonical sequence is **zebrafish hoxb1a-201**, 1,507 nt. The default atomic
                 sequence = gr.Textbox(value=SAMPLE_DNA, lines=8, label="DNA sequence (5′→3′)", info="Canonical hoxb1a-201 = 1,507 nt")
                 dna_model = gr.Radio(["sequence-dependent", "canonical"], value="sequence-dependent", label="Coarse DNA model")
                 structure_source = gr.Radio(
-                    ["3DNA sequence-dependent atomic rebuild (B-DNA)", "3DNA atomistic fiber", "Uploaded PDB/mmCIF", "Sequence-dependent coarse model"],
-                    value="3DNA sequence-dependent atomic rebuild (B-DNA)", label="3D structure source"
+                    ["Internal parametric heavy-atom model", "Uploaded PDB/mmCIF"],
+                    value="Internal parametric heavy-atom model", label="3D structure source"
                 )
-                dna_form = gr.Dropdown(["A-DNA", "B-DNA", "C-DNA", "Z-DNA", "A-RNA"], value="B-DNA", label="3DNA conformational form")
+                dna_form = gr.Dropdown(["A-DNA", "B-DNA", "C-DNA", "Z-DNA (idealized left-handed)", "A-RNA"], value="B-DNA", label="Nucleic-acid reference conformation")
                 pdb_file = gr.File(file_types=[".pdb", ".cif", ".mmcif"], type="filepath", label="Optional PDB/mmCIF structure")
-                x3dna_path = gr.Textbox(label="Optional 3DNA fiber executable or X3DNA directory", placeholder="e.g. C:\\x3dna-v2.4\\bin\\fiber")
-                check_3dna = gr.Button("Check 3DNA")
-                dna_status = gr.Markdown()
+                dna_status = gr.Markdown("Sequence structure source: internal parametric model; no external molecular builder required.")
             with gr.Column(scale=1):
                 projection_mode = gr.Radio(
                     ["Axial atomic density", "Single-turn axial density", "Helical phase-folded density"],
                     value="Single-turn axial density", label="2D molecular projection / target source",
                     info="Literal axial = whole molecule. Single-turn = one helical pitch. Phase-folded = all turns co-registered; derived, not a literal camera view."
                 )
-                atom_weighting = gr.Radio(["Uniform", "Atomic mass"], value="Uniform", label="Atomic density weighting")
+                atom_weighting = gr.Radio(["Uniform", "Atomic mass", "Electron count proxy"], value="Uniform", label="Atomic density weighting")
                 projection_size = gr.Slider(128, 1024, value=512, step=64, label="2D resolution")
                 atomic_blur_A = gr.Slider(0.0, 2.0, value=0.35, step=0.05, label="Atomic density blur (Å)")
                 helical_pitch_A = gr.Slider(28, 60, value=34.0, step=0.1, label="Helical pitch for phase fold (Å)")
@@ -529,14 +501,13 @@ The canonical sequence is **zebrafish hoxb1a-201**, 1,507 nt. The default atomic
 
         run.click(
             fn=run_pipeline,
-            inputs=[sequence, dna_model, structure_source, dna_form, pdb_file, x3dna_path,
+            inputs=[sequence, dna_model, structure_source, dna_form, pdb_file,
                     projection_mode, atom_weighting, projection_size, atomic_blur_A, helical_pitch_A, auto_pitch,
                     target_transform, membrane_radius_mm, membrane_speed, max_angular_mode, max_radial_mode, top_modes,
                     target_type, musical_quantization, physical_duration_per_mode_s, musical_duration_s, tempo_bpm],
             outputs=[out_3d, out_projection_literal, out_projection_target, out_spectrum, out_recon, out_table, out_summary,
                      physical_audio, best_mode_audio, musical_audio, out_bundle, reference_state],
         )
-        check_3dna.click(fn=three_dna_status, inputs=[x3dna_path], outputs=[dna_status])
 
     with gr.Tab("Experimental Cymatics Verification"):
         gr.Markdown(
@@ -572,9 +543,9 @@ A high image similarity score is evidence of pattern similarity; it is not, by i
         """
 ### Model boundaries
 
-The most rigorous sequence-only structural path available in this app is the 3DNA sequence-dependent atomic rebuild when 3DNA `rebuild` + `cp_std` are installed. The 3DNA fiber path is an idealized conformational reference. 3DNA's `fiber` models generate atomic coordinates for standard A/B/C/Z families; its `rebuild -atomic` workflow can also reconstruct atomic coordinates from base-pair-step parameters. The bundled Python sequence-dependent model remains a coarse-grained approximation.
+The primary sequence-only 3D structure path is an **internal pure-Python parametric heavy-atom geometry model**. It uses explicit base, deoxyribose/ribose and phosphate site templates, a straight global helical axis, and sequence-dependent B-DNA local twist/rise. It is a geometric reference for visualization and projection, not a force-field or quantum-chemistry calculation.
 
-The **axial atomic-density image is a true projection of the loaded atom coordinates**. The **helical phase-folded image is a derived coordinate transform**, not a literal camera projection. The circular membrane solver is an ideal tension-dominated membrane; real Chladni plates require measured/calibrated resonator models, boundary conditions and actuator coupling.
+The **axial atomic-density image is a true projection of the loaded atom coordinates**. The **helical phase-folded image is a derived coordinate transform**, not a literal camera projection. Uploaded PDB/mmCIF coordinates remain the preferred source for quantitative structural analysis. The circular membrane solver is an ideal tension-dominated membrane; real Chladni plates require measured/calibrated resonator models, boundary conditions and actuator coupling.
         """
     )
 

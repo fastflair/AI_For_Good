@@ -1,106 +1,52 @@
 DNA CYMATICS — EXPERIMENTAL PROTOCOL
-====================================
 
-Purpose
--------
-Test whether a precomputed molecular target can be reproduced as a spatial
-resonance pattern of a defined physical resonator.
+PURPOSE
+Test whether a computational DNA-derived target can be reproduced by a real
+mechanical/acoustic resonator and quantify the similarity.
 
-A. Pre-register the target
---------------------------
-1. Record sequence identifier and SHA-256 sequence hash.
-2. Record sequence class: genomic DNA, mature mRNA/cDNA, or CDS.
-3. Record structure source: PDB/mmCIF, 3DNA rebuild, 3DNA fiber, or fallback.
-4. Record DNA form assumption.
-5. Record 2D target type and all projection parameters.
-6. Record resonator geometry and model parameters.
-7. Save the generated analysis ZIP before the experiment.
+A. COMPUTATIONAL PREPARATION
+1. Enter the DNA sequence or retrieve it from the Gene / Sequence Retrieval tab.
+2. Record sequence class, source identifiers, assembly, accession and SHA-256 hash.
+3. Select the DNA conformation and structure source.
+4. For sequence-only work, use the internal parametric heavy-atom model.
+5. For a measured structure, prefer PDB/mmCIF coordinates.
+6. Generate the literal axial projection and the chosen target projection.
+7. Export the analysis bundle.
 
-B. Characterize the resonator independently
----------------------------------------------
-1. Measure plate/membrane diameter and thickness.
-2. Measure or document material.
-3. Document mounting and boundary condition.
-4. Document actuator type and location.
-5. Perform a frequency sweep over the intended range.
-6. Measure vibration response with an accelerometer, laser vibrometer, impedance
-   measurement, microphone or equivalent sensor where available.
-7. Record resonance peaks and associated images.
-8. Preserve the raw sweep and raw images.
+B. RESONATOR CHARACTERIZATION
+1. Record resonator shape, radius/width, thickness and material.
+2. Record mounting and boundary condition.
+3. Record actuator type and position.
+4. Record sensor/camera geometry.
+5. Sweep frequency over the intended range.
+6. Detect stable resonances and save their frequencies.
+7. Photograph representative mode shapes.
 
-Modern Chladni experiments show that the driving position and practical boundary
-conditions can alter nodal patterns, and that mode mixing may occur at higher
-frequencies. Do not assume the ideal analytical frequency is the measured
-resonance.
+C. DNA-TARGET TEST
+1. Select a candidate exact physical resonance from the computational model.
+2. Drive the real resonator at the measured/calibrated frequency.
+3. Use fixed amplitude where practical.
+4. Capture the cymatics image.
+5. Record frequency, amplitude, timestamp and environmental conditions.
+6. Repeat at least three times.
 
-C. Test one candidate mode
---------------------------
-1. Select a single top candidate mode.
-2. Use the exact unquantized physical frequency.
-3. Do not use the musical WAV for the physical test.
-4. Start at low amplitude.
-5. Increase excitation only as required for visible pattern formation.
-6. Record the exact frequency, amplitude setting and duration.
-7. Photograph the pattern with a fixed camera.
+D. CONTROLS
+Run:
+- target sequence,
+- shuffled sequence with matched length and base composition,
+- reverse complement when applicable,
+- periodic synthetic control sequences,
+- neighboring frequencies above and below the candidate.
 
-D. Verify image geometry
-------------------------
-1. Upload the image in the Experimental Cymatics Verification tab.
-2. Register only translation/small framing differences.
-3. Record RMSE, spatial correlation, Dice, IoU, boundary distance and angular
-   harmonic correlation.
-4. Do not redefine or re-select the target after viewing the experimental result.
+E. IMAGE ANALYSIS
+1. Crop the resonator to the same geometry used for the computational target.
+2. Normalize intensity.
+3. Register translation and, if justified by the experiment, small rotation.
+4. Calculate RMSE, Pearson correlation, Dice, IoU and boundary-distance statistics.
+5. Compare polar/angular harmonic spectra.
+6. Save the raw image and processed image.
 
-E. Controls
------------
-Use, at minimum, controls that separate sequence-specific geometry from generic
-length and GC-content effects:
-
-- GC-matched random sequence.
-- Randomly shuffled sequence.
-- Reverse complement.
-- Periodic sequence with matched length.
-- Canonical/idealized DNA-form reference.
-
-Run controls through exactly the same structural, projection and resonator model.
-
-F. Stronger inverse experiment
-------------------------------
-After resonance characterization, create a measured modal basis:
-
-frequency_i → measured spatial pattern_i
-
-Then solve for the sparse combination of measured modes that best matches the
-pre-registered DNA target.
-
-For each selected mode, record:
-
-frequency, amplitude, phase, actuator position, image ID, resonance confidence.
-
-G. Replication
---------------
-Repeat the experiment with:
-
-- fresh sample material,
-- the same resonator on different days,
-- and ideally a second resonator with independently measured geometry.
-
-H. Data retention
------------------
-Keep all of:
-
-- sequence FASTA,
-- sequence hash,
-- structure PDB/mmCIF,
-- analysis ZIP,
-- target image,
-- resonator dimensions,
-- mount description,
-- actuator description,
-- sweep data,
-- raw camera images,
-- processed images,
-- sensor measurements,
-- exact drive waveform,
-- comparison metrics,
-- software version.
+F. INTERPRETATION
+A pattern match supports geometric similarity under the chosen resonator conditions.
+It does not demonstrate that the frequency is an intrinsic property of DNA,
+that the mapping is unique, or that the result has biological significance.
