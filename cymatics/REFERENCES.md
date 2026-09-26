@@ -1,33 +1,41 @@
-# References
+# References and Source Notes
 
-The following references document the structural concepts used by the application.
+This file records the scientific basis and external-source roles used by the application. URLs are kept here so the software remains inspectable even when the app is used offline.
 
-1. DNA structural review covering A-, B- and Z-DNA families and their helical properties:
-   https://pmc.ncbi.nlm.nih.gov/articles/PMC9867160/
+## DNA structure and coordinate representation
 
-2. Review of A-DNA, B-DNA and Z-DNA molecular geometry and representative dimensions:
-   https://pmc.ncbi.nlm.nih.gov/articles/PMC6657641/
+- Calladine CM, Drew HR, Luisi BF, Travers AA. Understanding DNA: the molecule and how it works. Garland/related structural DNA literature.
+- Olson WK et al. DNA sequence-dependent structure: base-pair step parameters such as shift, slide, rise, tilt, roll, and twist are standard descriptors in structural DNA modeling.
+- 3D coordinate resources such as the Protein Data Bank (PDB) are preferred when an experimentally determined structure is available.
 
-3. Sequence-dependent structural properties of B-DNA and standard base-pair-step parameter conventions:
-   https://pmc.ncbi.nlm.nih.gov/articles/PMC8724355/
+## DNA databases used by the retrieval layer
 
-4. Structural discussion of DNA conformation and base-pair-step parameters:
-   https://pmc.ncbi.nlm.nih.gov/articles/PMC4139847/
+- ZFIN: https://zfin.org/
+- ZFIN hoxb1a gene record: https://zfin.org/ZDB-GENE-990415-101
+- ZFIN hoxb1a transcript record: https://zfin.org/ZDB-TSCRIPT-090929-7277
+- NCBI Gene: https://www.ncbi.nlm.nih.gov/gene/30337
+- Ensembl REST API documentation: https://rest.ensembl.org/documentation/
 
-5. Structural screen illustrating sequence-dependent variation in DNA helical parameters:
-   https://pmc.ncbi.nlm.nih.gov/articles/PMC1129101/
+## Cymatics / resonator physics
 
-6. Atomic-volume analysis of A-, B- and Z-DNA structures:
-   https://pmc.ncbi.nlm.nih.gov/articles/PMC55857/
+- Chladni patterns and mode shapes arise from standing-wave solutions of the resonator; real patterns depend on geometry and boundary conditions.
+- Circular membrane modes are Bessel-function solutions with angular and radial mode indices.
+- Circular thin plates are described by the plate equation with solutions involving Bessel and modified Bessel functions. Clamped boundaries lead to characteristic equations involving J_m and I_m and their derivatives.
 
-7. General nucleic-acid structural background from NCBI Bookshelf:
-   https://www.ncbi.nlm.nih.gov/books/
+Useful open literature/source pages:
 
-8. For structural coordinate provenance, use experimentally deposited PDB/mmCIF structures where available:
-   https://www.wwpdb.org/
+- Circular membrane mode discussion: https://pmc.ncbi.nlm.nih.gov/articles/PMC2711632/
+- Chladni/circular plate experimental discussion: https://pmc.ncbi.nlm.nih.gov/articles/PMC10969725/
+- Thin circular plate mode theory example: https://pmc.ncbi.nlm.nih.gov/articles/PMC8870825/
 
-NOTE
-The internal parametric heavy-atom generator in this repository is an original,
-deterministic geometry model built for this application. It should not be cited
-as a crystallographic reconstruction. Experimental or externally validated
-coordinate files should be treated as the higher-fidelity source.
+## Modeling policy
+
+The application deliberately distinguishes:
+
+1. molecular structure,
+2. derived 2-D molecular artwork,
+3. mathematical resonator mode fitting,
+4. physical resonator calibration,
+5. measured experimental image.
+
+Agreement between any two stages should not be treated as validation of the other stages unless the intervening physics has been independently tested.

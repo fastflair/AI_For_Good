@@ -1,236 +1,146 @@
-# Scientific Methods — DNA Cymatics v0.6
+# Scientific Methods
 
-## 1. Scope
+## Objective
 
-The application is a deterministic modeling and signal-processing system. It is not a molecular dynamics package and does not claim to predict a unique biological DNA conformation from sequence alone.
+The experimental objective is to construct a reproducible chain:
 
-The scientific objective is to construct a traceable chain:
+**DNA sequence → 3-D molecular geometry → 2-D molecular target → resonator mode decomposition → exact frequencies → physical cymatics image.**
 
-```text
-sequence → geometry → atomic-coordinate field → 2D target → resonator modes → test signal
+The workflow is intentionally divided into a molecular-geometry layer and a resonator-physics layer. No claim is made that DNA possesses a unique intrinsic audible frequency.
+
+## 1. Sequence provenance
+
+The bundled canonical input is the zebrafish `hoxb1a-201` mature mRNA/cDNA sequence (1,507 nt). The application also retrieves genomic DNA, all available transcripts/cDNA, CDS, and an upstream sequence from public sequence resources when the machine running the app has network access.
+
+A mature cDNA is not genomic double-stranded DNA. When a cDNA is used in the internal double-stranded geometry builder, the generated duplex is a **modeling construct**, not a claim about the in-vivo structure of that transcript.
+
+## 2. 3-D structure representation
+
+When a PDB/mmCIF is supplied, those coordinates are used directly after axis alignment.
+
+When no structure is supplied, the app builds an explicit heavy-atom model from sequence and structural templates. The model includes base, sugar, and phosphate heavy-atom sites and applies a DNA-form-specific helical scaffold. Local sequence-dependent base-pair-step parameters alter the geometry without allowing the global axis to drift arbitrarily.
+
+The internal builder is deterministic and self-contained. It is not a force-field calculation and does not represent an experimentally minimized structure.
+
+## 3. Axial atomic projection
+
+The structure is aligned so the helical axis is approximately the image-normal direction. Each heavy atom contributes an element-dependent footprint. The footprint can be a point Gaussian or a Gaussian whose width is derived from a van-der-Waals radius.
+
+Optional density weights are:
+
+- uniform site count,
+- atomic mass,
+- electron-count proxy (atomic number),
+- van-der-Waals volume proxy.
+
+These are different visualization measures; none should be interpreted as an exact X-ray or electron-scattering density calculation.
+
+## 4. Sequence-wide molecular artwork
+
+A whole-gene side projection is strongly elongated. For compact molecular artwork, the application provides:
+
+### Single-turn axial density
+
+A selected local ~one-turn window is projected directly.
+
+### Helical phase-folded density
+
+All atoms are rotated into a common helical-phase frame.
+
+### Rolling-turn ensemble axial density
+
+Every sliding one-turn window is phase-aligned and accumulated into the same transverse coordinate frame. This is the default because it uses the **entire sequence** rather than an arbitrary local window while retaining sequence-dependent differences in local atom occupancy.
+
+This projection is a sequence-derived molecular signature. It is not a literal photograph of the entire gene folded into one physical turn.
+
+## 5. Resonator conditioning
+
+A macroscopic plate cannot reproduce arbitrary atom-scale detail. Before inverse fitting, the target is normalized, Gaussian-smoothed, and tapered to the circular resonator aperture.
+
+This step is a spatial low-pass model: it asks what portion of the molecular artwork exists at spatial scales that the selected resonator basis can represent.
+
+## 6. Resonator modes
+
+Two idealized resonators are supported:
+
+### Circular membrane
+
+`phi_mn(r,theta) = J_m(alpha_mn r) cos(m theta - theta0)`
+
+where `alpha_mn` is a zero of the Bessel function `J_m`.
+
+### Clamped circular thin plate
+
+The plate displacement field is represented by the axisymmetric plate basis
+
+`phi_mn(r,theta) = [J_m(lambda_mn r) + B_mn I_m(lambda_mn r)] cos(m theta - theta0)`
+
+with `B_mn = -J_m(lambda_mn)/I_m(lambda_mn)` and the clamped-edge characteristic equation
+
+`J'_m(lambda) I_m(lambda) - J_m(lambda) I'_m(lambda) = 0`.
+
+The plate frequency is computed from
+
+`f = lambda^2/(2*pi*R^2) * sqrt(D/(rho*h))`
+
+and
+
+`D = E h^3/[12(1-nu^2)]`.
+
+For a real apparatus, the boundary condition must match the mechanical construction. A plate that is simply supported, free-edged, bolted at discrete points, bonded, or driven at a finite-area actuator will not exactly follow the ideal clamped model.
+
+## 7. Inverse mode fitting
+
+Each mode family is orientation-matched. Mode fields are scaled by a point-actuator coupling proxy. Non-negative least squares then finds a positive mixture of modal observables.
+
+A small optional L2 regularization is used to discourage unstable solutions. After selecting the strongest `N` modes, the selected basis is **re-fit** rather than merely truncating and renormalizing the original coefficients.
+
+The reported `mixture_weight` is a modeled observable-power contribution. The physical drive amplitude is approximately proportional to its square root, with an additional actuator-coupling compensation proxy.
+
+## 8. Default physical observable
+
+The default inverse target is **displacement power**. This is convenient because, for distinct frequencies in a linear system, cross terms can average out over a sufficiently long observation interval, allowing a positive sum of modal power-like contributions to serve as a first-order inverse design model.
+
+This does not constitute a complete mechanical model of powder/sand transport.
+
+The application also provides a `Nodal / sand` proxy. That mode concentrates image intensity near predicted zero-displacement lines, with gradient weighting to suppress broad low-amplitude regions. It is explicitly phenomenological.
+
+## 9. Frequency generation
+
+The physical WAV preserves the exact modeled resonance frequencies. The musical WAV is generated separately and may quantize frequencies into musical notes.
+
+Therefore:
+
+`physical frequency != musical note`
+
+unless an experiment deliberately chooses a pitch-quantized drive.
+
+## 10. Experimental calibration
+
+A calibration CSV may contain:
+
+```csv
+frequency_Hz,response
+110.7,0.20
+267.1,0.91
+453.2,0.54
 ```
 
-## 2. Sequence classes
+The current calibration layer maps theoretical candidate frequencies to nearby measured resonances and optionally weights them by measured response. It does not reconstruct a complete complex transfer function or guarantee the measured mode shape is identical to the ideal mode.
 
-The retrieval system distinguishes:
+The experimental verification module registers a measured image using in-plane rotation and translation and then reports spatial metrics. Registration improves comparability but does not prove frequency causality.
 
-- genomic DNA,
-- mature mRNA/cDNA,
-- protein-coding CDS,
-- upstream genomic sequence.
+## 11. What would constitute strong physical validation
 
-Sequence provenance is retained in the analysis bundle.
+A strong experiment would record:
 
-## 3. Coarse duplex geometry
+1. plate dimensions and material,
+2. mounting/boundary condition,
+3. actuator location and contact geometry,
+4. input waveform and voltage/current,
+5. actual resonant frequencies,
+6. camera image at each resonance,
+7. orientation and scale registration,
+8. repeat measurements.
 
-The base-pair-step representation uses the standard descriptors:
-
-- shift,
-- slide,
-- rise,
-- tilt,
-- roll,
-- twist.
-
-The internal B-DNA sequence-dependent model uses dinucleotide averages for local twist/rise and records the remaining local parameters in the step table.
-
-The global molecular axis is propagated from twist and rise without recursively applying roll/tilt to the global frame. This design prevents a long sequence from turning into an artificial random walk while preserving local sequence information.
-
-## 4. Pure-Python parametric heavy-atom model
-
-Because the application must not depend on an external sequence-to-structure builder, the sequence-only coordinate model is implemented directly in Python.
-
-### 4.1 Base sites
-
-For each nucleotide, the model places the standard heavy-atom names for adenine, guanine, cytosine and thymine using base-specific local 2D templates.
-
-### 4.2 Sugar sites
-
-A seven-site sugar template is used:
-
-```text
-C1'
-O4'
-C4'
-C3'
-O3'
-C2'
-C5'
-```
-
-The local z offsets introduce a small puckering component.
-
-### 4.3 Phosphate sites
-
-Each nucleotide contains:
-
-```text
-P
-O1P
-O2P
-O5P
-```
-
-The sites follow the outer helical backbone.
-
-### 4.4 Heavy atoms only
-
-Hydrogen positions are intentionally not generated. Their coordinates are more sensitive to protonation, tautomer and local geometry than the heavy-atom scaffold and are not required for the primary axial projection.
-
-### 4.5 Sequence dependence
-
-For B-DNA, the model uses the sequence-dependent local twist and rise generated by the coarse dinucleotide table. Shift and slide are represented as a small transverse modulation rather than integrated as a macroscopic bend.
-
-For A-DNA, C-DNA, Z-DNA and A-RNA, idealized conformational presets provide the global helical dimensions; sequence-specific non-B parameters are not claimed to be fully reconstructed.
-
-## 5. Conformational presets
-
-Representative idealized values used by the current application:
-
-| Form | Rise (Å) | Rotation / bp (°) | Approx. diameter (Å) | Sense |
-|---|---:|---:|---:|---|
-| B-DNA | 3.38 | +36.0 | 20 | right |
-| A-DNA | 2.81 | +32.7 | 23 | right |
-| C-DNA | 3.31 | +39.5 | ~19 | right |
-| Z-DNA | 3.70 | −30.0 average | 18 | left |
-| A-RNA | 2.81 | +32.7 | 23 | right |
-
-These are idealized reference values, not sequence-specific predictions. Z-DNA is represented by an alternating left-handed conceptual geometry with local base-orientation changes; it should not be interpreted as a full atomistic reconstruction of a particular Z-DNA crystal structure.
-
-## 6. Coordinate alignment
-
-For uploaded PDB/mmCIF structures and internally generated coordinates, the molecular axis is estimated from phosphorus atoms when at least four are available. Otherwise all coordinates are used.
-
-PCA provides a deterministic orthonormal basis. The sign convention is fixed for reproducibility.
-
-## 7. Literal axial projection
-
-Every modeled atom is mapped to its transverse coordinates. The image is formed by weighted 2D histogramming followed by optional Gaussian rendering blur.
-
-The projection is therefore a coordinate projection, not a stylized illustration.
-
-## 8. Helical phase folding
-
-For a selected helical pitch `P`, each atom is rotated by:
-
-```text
-φ = -2π (z mod P) / P
-```
-
-before dropping the axial coordinate.
-
-This co-registers successive helical turns.
-
-It is a derived transform rather than a physical camera projection.
-
-## 9. One-turn projection
-
-A one-pitch axial slab centered on the molecule is selected before projection.
-
-This view is useful because an entire gene-length molecule would otherwise collapse into a line when viewed from the side, while the top-down cross-section remains a compact pattern.
-
-## 10. Target transformation
-
-The atomic-density image is converted optionally into an edge/nodal target:
-
-```text
-ρ(x,y)
-  ↓
-Gaussian smoothing
-  ↓
-∂ρ/∂x, ∂ρ/∂y
-  ↓
-|∇ρ|
-```
-
-This produces a geometric feature field appropriate for comparison with nodal lines.
-
-The transformation does not assert that `|∇ρ|` is the physical displacement field of a plate.
-
-## 11. Fourier analysis
-
-The target image is Hann-windowed and transformed with a 2D FFT.
-
-The strongest nonredundant spatial components provide spatial scales and orientations. They are useful for analysis and for a mathematical sonification path.
-
-They are not automatically interpreted as physical resonances.
-
-## 12. Polar harmonic analysis
-
-The target is sampled in polar coordinates and decomposed into angular orders `m`.
-
-This is useful for circular resonator comparison because circular membrane/plate mode families possess angular nodal structure.
-
-## 13. Circular membrane modes
-
-The current built-in resonator uses the ideal membrane equation.
-
-Mode family:
-
-```text
-φ_mn(r,θ) = J_m(α_mn r/R) cos(mθ - φ)
-```
-
-with Bessel zero `α_mn`.
-
-The model frequency is:
-
-```text
-f_mn = c α_mn / (2πR)
-```
-
-The cosine/sine degeneracy is represented by an orientation angle `φ` that is optimized during matching.
-
-## 14. Why a musical chord is not a static Chladni pattern
-
-A resonator has a spatial mode for a given resonant condition. Different frequencies generally excite different spatial structures. Therefore:
-
-```text
-frequency A + frequency B + frequency C
-```
-
-does not automatically equal one static pattern corresponding to A+B+C.
-
-This is why the software produces a separate exact physical-drive WAV and creative musical WAV.
-
-## 15. Experimental verification
-
-The computational result should be verified by measuring a real resonator.
-
-Recommended workflow:
-
-```text
-1. characterize the resonator
-2. locate actual resonances
-3. image the mode shapes
-4. register each image to the computational target
-5. calculate similarity metrics
-6. test neighboring frequencies and controls
-```
-
-A real resonator requires measured dimensions, boundary conditions, material properties, damping and actuator coupling.
-
-## 16. Image metrics
-
-The application calculates:
-
-- RMSE,
-- Pearson spatial correlation,
-- Dice overlap,
-- IoU,
-- boundary-distance statistics,
-- angular-harmonic correlation.
-
-No single metric is treated as decisive.
-
-## 17. Limitations
-
-The internal sequence-to-atomic model is not equivalent to crystallographic or cryo-EM coordinates. It is a deterministic geometry hypothesis with explicit atom labels.
-
-Sequence alone does not uniquely specify a physical DNA structure because conformation depends on sequence, environment, ions, hydration, binding partners, supercoiling, mechanical constraints and other factors.
-
-Consequently, any frequency generated from this model belongs to the **chosen resonator model**, not to DNA as an intrinsic property.
-
-## Runtime source identifier
-
-The built-in atomistic path uses one canonical identifier: `Internal parametric heavy-atom model`. The UI imports this value from the geometry module rather than duplicating the string. Uploaded PDB/mmCIF is likewise represented by a canonical constant. This prevents a UI/runtime label mismatch from selecting an unsupported branch.
+The measured mode library can then replace the ideal analytical mode library. That is the preferred path for future versions.

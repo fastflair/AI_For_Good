@@ -3,10 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 from typing import Dict, List, Tuple
+from functools import lru_cache
 
 import numpy as np
 import pandas as pd
-from scipy.ndimage import gaussian_filter, zoom
+from scipy.ndimage import gaussian_filter, zoom, rotate
 from scipy.optimize import nnls
 
 
@@ -451,6 +452,20 @@ def _corr(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(aa, bb) / denom) if denom > 1e-12 else 0.0
 
 
+def _fit_nonnegative_basis(A: np.ndarray, b: np.ndarray, regularization: float = 0.0) -> np.ndarray:
+    """Solve NNLS, optionally with a small L2 penalty implemented by augmentation."""
+    A = np.asarray(A, dtype=float)
+    b = np.asarray(b, dtype=float)
+    lam = max(float(regularization), 0.0)
+    if lam > 0.0 and A.shape[1] > 0:
+        A_aug = np.vstack([A, math.sqrt(lam) * np.eye(A.shape[1])])
+        b_aug = np.concatenate([b, np.zeros(A.shape[1], dtype=float)])
+        coeff, _ = nnls(A_aug, b_aug)
+    else:
+        coeff, _ = nnls(A, b)
+    return np.maximum(coeff, 0.0)
+
+
 def rank_square_plate_modes(
     target_image: np.ndarray,
     width_m: float,
@@ -669,7 +684,8 @@ def image_metrics(reference: np.ndarray, measured: np.ndarray, threshold: float 
     }
 
 # ---------- Atomic/circular-mode research pipeline ----------
-from scipy.special import jn_zeros, jv
+from scipy.special import jn_zeros, jv, iv, ive, jvp, ivp
+from scipy.optimize import brentq
 from scipy.ndimage import binary_erosion, distance_transform_edt
 
 
@@ -684,6 +700,162 @@ def circular_membrane_mode_frequency(m: int, n: int, radius_m: float, wave_speed
     alpha = float(jn_zeros(int(m), int(n))[-1])
     return float(wave_speed_m_s * alpha / (2.0 * math.pi * radius_m))
 
+
+
+@lru_cache(maxsize=256)
+def circular_clamped_plate_eigenvalue(m: int, n: int) -> float:
+    """Return the nth positive clamped-circular-plate eigenvalue lambda*R.
+
+    For a uniform, isotropic Kirchhoff-Love circular plate with a clamped edge,
+    the characteristic equation is
+
+        J'_m(lambda) I_m(lambda) - J_m(lambda) I'_m(lambda) = 0.
+
+    The positive roots are found by bracketing each root around the corresponding
+    Bessel J_m zero. This avoids a large global root scan while retaining a fully
+    deterministic numerical solution.
+    """
+    m = int(m); n = int(n)
+    if m < 0 or n < 1 or m > 64 or n > 32:
+        raise ValueError("Unsupported plate mode indices")
+
+    def characteristic(lam: float) -> float:
+        return float(jvp(m, lam, 1) * iv(m, lam) - jv(m, lam) * ivp(m, lam, 1))
+
+    # Clamped-plate roots lie just above the corresponding J_m zeros. The bracket
+    # is deliberately generous and is expanded if required for extreme modes.
+    bessel_zero = float(jn_zeros(m, n)[-1])
+    a = max(float(m) + 1e-4, bessel_zero + 0.20)
+    b = bessel_zero + 1.40
+    fa = characteristic(a); fb = characteristic(b)
+    for _ in range(8):
+        if np.isfinite(fa) and np.isfinite(fb) and fa * fb < 0.0:
+            return float(brentq(characteristic, a, b, xtol=1e-11, rtol=1e-11, maxiter=100))
+        b += 0.50
+        fb = characteristic(b)
+    # Fall back to a local scan only if numerical behavior at very high modes
+    # defeats the normal bracket. This keeps the normal path fast.
+    grid = np.linspace(a, b, 1500)
+    vals = np.asarray([characteristic(float(x)) for x in grid])
+    for i in range(len(grid) - 1):
+        if np.isfinite(vals[i]) and np.isfinite(vals[i + 1]) and vals[i] * vals[i + 1] < 0.0:
+            return float(brentq(characteristic, float(grid[i]), float(grid[i + 1]), xtol=1e-11, rtol=1e-11))
+    raise RuntimeError(f"Could not determine clamped circular plate root m={m}, n={n}")
+
+
+def circular_clamped_plate_mode_frequency(
+    m: int,
+    n: int,
+    radius_m: float,
+    thickness_m: float,
+    young_pa: float,
+    density_kg_m3: float,
+    poisson: float,
+) -> float:
+    """Thin-plate bending resonance of an ideal clamped circular plate.
+
+    f = lambda^2/(2*pi*R^2) * sqrt(D/(rho*h)),
+    D = E*h^3/(12*(1-nu^2)).
+    """
+    m = int(m); n = int(n)
+    radius_m = float(radius_m); thickness_m = float(thickness_m)
+    young_pa = float(young_pa); density_kg_m3 = float(density_kg_m3); poisson = float(poisson)
+    if radius_m <= 0 or thickness_m <= 0 or young_pa <= 0 or density_kg_m3 <= 0 or abs(poisson) >= 0.5:
+        raise ValueError("Invalid circular plate properties")
+    lam = circular_clamped_plate_eigenvalue(m, n)
+    D = young_pa * thickness_m**3 / (12.0 * (1.0 - poisson**2))
+    return float((lam**2 / (2.0 * math.pi * radius_m**2)) * math.sqrt(D / (density_kg_m3 * thickness_m)))
+
+
+def circular_clamped_plate_mode_field(m: int, n: int, size: int = 192, nodal: bool = True) -> np.ndarray:
+    """Normalized clamped circular plate mode field for image synthesis."""
+    if not (0 <= int(m) <= 64 and 1 <= int(n) <= 32):
+        raise ValueError("Mode indices outside supported range")
+    size = int(size)
+    if size < 32:
+        raise ValueError("size must be >= 32")
+    x = np.linspace(-1.0, 1.0, size)
+    y = np.linspace(-1.0, 1.0, size)
+    X, Y = np.meshgrid(x, y)
+    r = np.hypot(X, Y)
+    theta = np.arctan2(Y, X)
+    lam = circular_clamped_plate_eigenvalue(int(m), int(n))
+    # B = -J_m(lambda)/I_m(lambda), evaluated directly for numerical transparency.
+    B = -float(jv(int(m), lam) / iv(int(m), lam))
+    radial = jv(int(m), lam * r) + B * iv(int(m), lam * r)
+    phi = radial * np.cos(int(m) * theta)
+    inside = r <= 1.0
+    field = _mode_target_field(phi, inside, "Nodal / sand" if nodal else "Displacement magnitude", node_width=0.18)
+    return field
+
+
+def circular_resonator_mode_frequency(
+    m: int,
+    n: int,
+    radius_m: float,
+    model: str = "Circular membrane",
+    wave_speed_m_s: float = 120.0,
+    thickness_m: float = 0.001,
+    young_pa: float = 200e9,
+    density_kg_m3: float = 7850.0,
+    poisson: float = 0.30,
+) -> float:
+    if model == "Circular membrane":
+        return circular_membrane_mode_frequency(m, n, radius_m, wave_speed_m_s)
+    if model == "Clamped circular thin plate":
+        return circular_clamped_plate_mode_frequency(m, n, radius_m, thickness_m, young_pa, density_kg_m3, poisson)
+    raise ValueError(f"Unsupported resonator model: {model}")
+
+
+def circular_resonator_mode_field(
+    m: int,
+    n: int,
+    size: int = 192,
+    model: str = "Circular membrane",
+    nodal: bool = True,
+) -> np.ndarray:
+    if model == "Circular membrane":
+        return circular_membrane_mode_field(m, n, size=size, nodal=nodal)
+    if model == "Clamped circular thin plate":
+        return circular_clamped_plate_mode_field(m, n, size=size, nodal=nodal)
+    raise ValueError(f"Unsupported resonator model: {model}")
+
+
+def prepare_resonator_target(
+    image: np.ndarray,
+    smoothing_px: float = 3.0,
+    radial_aperture: float = 0.98,
+) -> np.ndarray:
+    """Condition a molecular target to the spatial scale representable by a resonator.
+
+    Molecular projections can contain atom-scale detail far above the spatial bandwidth
+    of a macroscopic resonator. Gaussian prefiltering is therefore applied before inverse
+    mode fitting. The full-resolution molecular target remains available for artwork and
+    later experimental comparison.
+    """
+    target = np.asarray(image, dtype=float)
+    if target.ndim != 2 or target.shape[0] != target.shape[1]:
+        raise ValueError("Target image must be a square 2-D array")
+    target = target - float(target.min())
+    if target.max() > 0:
+        target = target / float(target.max())
+    sigma = max(0.0, float(smoothing_px))
+    if sigma > 0:
+        target = gaussian_filter(target, sigma=sigma, mode="nearest")
+    size = target.shape[0]
+    yy, xx = np.indices(target.shape, dtype=float)
+    xx = 2.0 * xx / max(size - 1, 1) - 1.0
+    yy = 2.0 * yy / max(size - 1, 1) - 1.0
+    r = np.hypot(xx, yy)
+    # Smoothly taper the square canvas to the circular resonator aperture.
+    ap = min(max(float(radial_aperture), 0.80), 1.0)
+    taper = np.clip((ap + 0.08 - r) / 0.08, 0.0, 1.0)
+    target *= taper
+    target[r > 1.0] = 0.0
+    peak = float(target.max())
+    if peak > 0:
+        target /= peak
+    return target
 
 def circular_membrane_mode_field(
     m: int,
@@ -741,36 +913,90 @@ def _normalized_projection_target(image: np.ndarray, nodal_target: bool = True, 
     return target
 
 
+def _mode_target_field(phi: np.ndarray, inside: np.ndarray, target_type: str, node_width: float = 0.18) -> np.ndarray:
+    """Convert displacement into an observable-like field.
+
+    For a sand/nodal image, a raw low-displacement indicator incorrectly treats the
+    center of high-angular-order modes as a broad node because the radial Bessel term
+    is small there. Instead, the nodal proxy is concentrated at zero crossings and
+    weighted by local displacement gradient, which is much closer to a thin nodal-line
+    image. It remains a phenomenological particle-accumulation proxy rather than a
+    granular-dynamics simulation.
+    """
+    if target_type == "Nodal / sand":
+        vals = np.abs(phi)
+        scale = max(float(np.percentile(vals[inside], 75)), 1e-9)
+        node_sigma = max(float(node_width) * scale, 1e-9)
+        line_likelihood = np.exp(-((vals / node_sigma) ** 2))
+        gy, gx = np.gradient(phi)
+        grad = np.hypot(gx, gy)
+        gscale = max(float(np.percentile(grad[inside], 90)), 1e-9)
+        gradient_weight = np.clip(grad / gscale, 0.0, 1.0)
+        field = line_likelihood * (0.10 + gradient_weight) ** 1.5
+    elif target_type == "Displacement magnitude":
+        field = np.abs(phi)
+    elif target_type == "Displacement power":
+        field = phi ** 2
+    else:
+        raise ValueError(f"Unsupported target_type: {target_type}")
+    field = np.asarray(field, dtype=float)
+    field[~inside] = 0.0
+    mn = float(field[inside].min())
+    mx = float(field[inside].max())
+    if mx > mn:
+        field = (field - mn) / (mx - mn)
+    return field
+
+
 def rank_circular_membrane_modes(
     target_image: np.ndarray,
     radius_m: float,
     wave_speed_m_s: float,
     max_angular_mode: int = 20,
     max_radial_mode: int = 12,
-    top_modes: int = 16,
-    target_type: str = "Nodal / sand",
+    top_modes: int = 8,
+    target_type: str = "Displacement power",
     fit_size: int = 128,
+    candidate_pool: int | None = None,
+    orientation_steps: int = 36,
+    node_width: float = 0.18,
+    actuator_r_fraction: float = 0.35,
+    actuator_theta_deg: float = 0.0,
+    actuator_coupling_floor: float = 0.03,
+    resonator_model: str = "Circular membrane",
+    plate_thickness_m: float = 0.001,
+    plate_young_pa: float = 200e9,
+    plate_density_kg_m3: float = 7850.0,
+    plate_poisson: float = 0.30,
+    inverse_regularization: float = 0.002,
 ) -> tuple[pd.DataFrame, np.ndarray]:
-    """Rank ideal circular membrane modes against a 2-D target.
+    """Inverse-fit circular-membrane mode intensities to a DNA-derived 2-D target.
 
-    The circular membrane approximation uses Bessel-function eigenfunctions.
-    For m>0, cosine/sine partners are frequency-degenerate, so the implementation
-    searches the orientation analytically by evaluating a vectorized orientation
-    grid. This preserves the frequency family while fitting its spatial phase.
+    Each (m,n) family is first orientation-matched because cosine/sine partners are
+    frequency-degenerate. A non-negative least-squares fit then finds the simultaneous
+    mode mixture whose *time-averaged modal observable* best matches the target.
 
-    This is a *candidate mode identification* model. It is not a calibrated model
-    of a metal plate; boundary conditions, stiffness, damping and actuator coupling
-    must be measured for physical prediction.
+    For distinct drive frequencies and a linear system, the cross terms between modes
+    average out over an observation interval that is long compared with the beat periods,
+    so a weighted sum of modal power/particle-density proxies is a useful first-order
+    inverse model for image synthesis. It is not a rigorous nonlinear sand-transport model.
+    The returned mixture_weight represents observable power. A small non-negative
+    regularization can favor a compact/stable solution, and the final sparse mode set is
+    re-fit after truncation so the reported waveform corresponds to the reported modes.
+    The physical displacement/drive amplitude scales approximately with sqrt(weight), with
+    an additional actuator-coupling compensation proxy in the physical-drive output.
     """
-    if target_type not in {"Nodal / sand", "Displacement magnitude"}:
+    if target_type not in {"Nodal / sand", "Displacement magnitude", "Displacement power"}:
         raise ValueError("Unsupported target_type")
     radius_m = float(radius_m); wave_speed_m_s = float(wave_speed_m_s)
     if radius_m <= 0 or wave_speed_m_s <= 0:
         raise ValueError("radius_m and wave_speed_m_s must be positive")
-    max_angular_mode = int(max_angular_mode)
-    max_radial_mode = int(max_radial_mode)
-    top_modes = int(top_modes)
-    fit_size = int(fit_size)
+    max_angular_mode = int(max_angular_mode); max_radial_mode = int(max_radial_mode)
+    top_modes = int(top_modes); fit_size = int(fit_size)
+    orientation_steps = max(1, int(orientation_steps))
+    actuator_r_fraction = float(actuator_r_fraction)
+    if not (0.0 <= actuator_r_fraction <= 0.99):
+        raise ValueError("actuator_r_fraction must be in [0, 0.99]")
     if not (0 <= max_angular_mode <= 64 and 1 <= max_radial_mode <= 32):
         raise ValueError("Unsupported mode search limits")
     if not (1 <= top_modes <= (max_angular_mode + 1) * max_radial_mode):
@@ -779,80 +1005,181 @@ def rank_circular_membrane_modes(
         raise ValueError("fit_size must be >= 32")
 
     target = _resize_square(target_image, fit_size)
-    x = np.linspace(-1.0, 1.0, fit_size)
-    y = np.linspace(-1.0, 1.0, fit_size)
-    X, Y = np.meshgrid(x, y)
-    r = np.hypot(X, Y)
-    theta = np.arctan2(Y, X)
+    y, x = np.indices((fit_size, fit_size), dtype=float)
+    x = 2.0 * x / (fit_size - 1) - 1.0
+    y = 2.0 * y / (fit_size - 1) - 1.0
+    r = np.hypot(x, y); theta = np.arctan2(y, x)
     inside = r <= 1.0
-    target_inside = target[inside].astype(float)
+    target_inside = np.asarray(target[inside], dtype=float)
     target_inside -= target_inside.mean()
     target_norm = float(np.linalg.norm(target_inside))
 
     rows: list[dict] = []
     fields: dict[tuple[int, int], np.ndarray] = {}
-
+    # For NNLS we need a consistent set of oriented fields. Store best orientation per family.
     for m in range(max_angular_mode + 1):
         zeros = jn_zeros(m, max_radial_mode)
-        radial_base = [jv(m, float(alpha) * r) for alpha in zeros]
-        for n in range(1, max_radial_mode + 1):
-            alpha = float(zeros[n - 1])
-            radial = np.asarray(radial_base[n - 1], dtype=float)
-            angles = np.array([0.0], dtype=float) if m == 0 else np.linspace(0.0, math.pi / m, 25)
-
-            # Vectorized orientation evaluation: (y, x, orientation).
+        angles = np.array([0.0]) if m == 0 else np.linspace(0.0, math.pi / m, orientation_steps, endpoint=False)
+        for n, alpha0 in enumerate(zeros, start=1):
+            # IMPORTANT: for a thin plate the spatial eigenvalue lambda_mn is NOT the
+            # membrane Bessel zero alpha_mn. The plate field must be evaluated with the
+            # same lambda used by the plate frequency/eigenvalue equation.
+            alpha = float(alpha0) if resonator_model == "Circular membrane" else float(circular_clamped_plate_eigenvalue(m, n))
+            radial = np.asarray(jv(m, alpha * r), dtype=float)
             disp = radial[:, :, None] * np.cos(m * theta[:, :, None] - angles[None, None, :])
-            if target_type == "Nodal / sand":
-                vals = np.abs(disp[:, :, :])
-                scale = max(float(np.percentile(vals[inside, :], 75)), 1e-6)
-                field_stack = np.exp(-((vals / (0.22 * scale)) ** 2))
-            else:
-                field_stack = np.abs(disp)
-            field_stack[~inside, :] = 0.0
-
+            field_stack = np.empty_like(disp, dtype=float)
+            for j in range(disp.shape[-1]):
+                field_stack[:, :, j] = _mode_target_field(disp[:, :, j], inside, target_type, node_width=node_width)
             flat = field_stack[inside, :].T
             flat -= flat.mean(axis=1, keepdims=True)
             norms = np.linalg.norm(flat, axis=1)
-            if target_norm > 1e-12:
-                scores = (flat @ target_inside) / np.maximum(norms * target_norm, 1e-12)
-            else:
-                scores = np.zeros(len(angles), dtype=float)
+            scores = (flat @ target_inside) / np.maximum(norms * target_norm, 1e-12) if target_norm > 1e-12 else np.zeros(len(angles))
             best_idx = int(np.argmax(scores))
-            best_score = float(scores[best_idx])
             best_field = field_stack[:, :, best_idx].copy()
-            peak = float(best_field.max())
-            if peak > 0:
-                best_field /= peak
+            # Point-actuator geometric participation factor. It is a simple controllability
+            # indicator, not a full actuator/plate transfer function.
+            rr0 = actuator_r_fraction
+            tt0 = math.radians(float(actuator_theta_deg))
+            if resonator_model == "Circular membrane":
+                radial_at_actuator = float(jv(m, alpha * rr0))
+            else:
+                B = -float(jv(m, alpha) / iv(m, alpha))
+                radial_at_actuator = float(jv(m, alpha * rr0) + B * iv(m, alpha * rr0))
+            coupling = abs(float(radial_at_actuator * math.cos(m * tt0 - float(angles[best_idx])))) if m > 0 else abs(float(radial_at_actuator))
+            coupling = max(coupling, float(actuator_coupling_floor))
             fields[(m, n)] = best_field
-
-            freq = circular_membrane_mode_frequency(m, n, radius_m, wave_speed_m_s)
+            freq = circular_resonator_mode_frequency(
+                m, n, radius_m, model=resonator_model, wave_speed_m_s=wave_speed_m_s,
+                thickness_m=plate_thickness_m, young_pa=plate_young_pa,
+                density_kg_m3=plate_density_kg_m3, poisson=plate_poisson,
+            )
             rows.append({
-                "m": int(m),
-                "n": int(n),
-                "frequency_Hz": float(freq),
-                "angular_order": int(m),
-                "radial_order": int(n),
-                "bessel_zero": alpha,
+                "m": int(m), "n": int(n), "frequency_Hz": float(freq),
+                "angular_order": int(m), "radial_order": int(n),
+                "radial_eigenvalue": float(alpha), "membrane_bessel_zero": float(alpha0),
                 "orientation_deg": float(math.degrees(float(angles[best_idx]))),
-                "pattern_correlation": best_score,
+                "single_mode_correlation": float(scores[best_idx]),
+                "actuator_coupling": coupling,
                 "mode_frequency_family": f"(m={m}, n={n})",
+                "resonator_model": resonator_model,
             })
 
-    rows_df = pd.DataFrame(rows).sort_values("pattern_correlation", ascending=False).reset_index(drop=True)
-    selected = rows_df.head(top_modes).copy()
-    positive = np.maximum(selected["pattern_correlation"].to_numpy(float), 0.0)
-    weights = positive / positive.sum() if positive.sum() > 0 else np.ones(len(selected)) / len(selected)
+    raw = pd.DataFrame(rows)
+    if raw.empty:
+        raise ValueError("No resonant modes generated")
+    raw = raw.sort_values("single_mode_correlation", ascending=False).reset_index(drop=True)
+    pool_n = int(candidate_pool or max(top_modes * 4, top_modes))
+    pool_n = max(top_modes, min(pool_n, len(raw)))
+
+    # Preserve the dominant angular orders of the DNA target in the candidate library.
+    # A pure single-mode correlation can otherwise over-select visually busy high-m modes
+    # while missing the target's primary rotational symmetry (for example m=10 for a
+    # roughly decagonal B-DNA cross-sectional signature).
+    harmonic = polar_harmonic_spectrum(target, max_m=min(max_angular_mode, 32))
+    harmonic_orders = [int(v) for v in harmonic.sort_values("energy_fraction", ascending=False)["angular_order_m"].tolist()]
+    keep_orders = set(harmonic_orders[:min(6, len(harmonic_orders))])
+    symmetry_pool = raw[raw["m"].isin(keep_orders)]
+    remainder = raw[~raw.index.isin(symmetry_pool.index)]
+    take_sym = min(len(symmetry_pool), max(top_modes, pool_n // 2))
+    take_rem = max(0, pool_n - take_sym)
+    pool = pd.concat([symmetry_pool.head(take_sym), remainder.head(take_rem)], ignore_index=True)
+    if len(pool) < top_modes:
+        pool = raw.head(max(top_modes, len(pool))).copy()
+
+    # NNLS operates on normalized observable fields. Low coupling is penalized by
+    # scaling the basis downward: weakly coupled modes require more drive for the same
+    # physical effect and therefore are less attractive unless necessary for shape fit.
+    columns = []
+    for _, row in pool.iterrows():
+        field = fields[(int(row["m"]), int(row["n"]))]
+        coupling = float(row["actuator_coupling"])
+        vec = field[inside].astype(float) * coupling
+        columns.append(vec)
+    A = np.column_stack(columns)
+    col_norms = np.linalg.norm(A, axis=0)
+    col_norms[col_norms < 1e-12] = 1.0
+    A_n = A / col_norms[None, :]
+    b = np.maximum(target_inside - target_inside.min(), 0.0)
+    b_norm = np.linalg.norm(b)
+    b_n = b / b_norm if b_norm > 1e-12 else b
+    coeff = _fit_nonnegative_basis(A_n, b_n, regularization=float(inverse_regularization))
+    if np.all(coeff <= 0):
+        coeff = np.zeros_like(coeff); coeff[:top_modes] = 1.0
+    # Convert coefficient space back to observable power weights.
+    power = np.maximum(coeff / col_norms, 0.0)
+    if np.sum(power) <= 0:
+        power[:top_modes] = 1.0
+    power = power / np.sum(power)
+    # Keep only the strongest contributors, then re-fit NNLS on that sparse basis.
+    # Re-fitting is important: truncating a full NNLS solution and merely renormalizing
+    # its coefficients can unnecessarily degrade the reconstructed spatial pattern.
+    keep = np.argsort(power)[::-1][:top_modes]
+    selected = pool.iloc[keep].copy().reset_index(drop=True)
+    selected_fields = [fields[(int(row["m"]), int(row["n"]))] for _, row in selected.iterrows()]
+    A_sel = np.column_stack([f[inside].astype(float) * float(row["actuator_coupling"]) for f, (_, row) in zip(selected_fields, selected.iterrows())])
+    sel_norms = np.linalg.norm(A_sel, axis=0)
+    sel_norms[sel_norms < 1e-12] = 1.0
+    A_sel_n = A_sel / sel_norms[None, :]
+    sel_coeff = _fit_nonnegative_basis(A_sel_n, b_n, regularization=float(inverse_regularization))
+    sparse_power = np.maximum(sel_coeff / sel_norms, 0.0)
+    if float(sparse_power.sum()) <= 0.0:
+        sparse_power = np.maximum(selected_power[:len(selected)], 0.0)
+    if float(sparse_power.sum()) <= 0.0:
+        sparse_power = np.ones(len(selected), dtype=float)
+    sparse_power /= float(sparse_power.sum())
+
     recon = np.zeros((fit_size, fit_size), dtype=float)
-    for weight, (_, row) in zip(weights, selected.iterrows()):
-        recon += float(weight) * fields[(int(row["m"]), int(row["n"]))]
+    for w, (_, row) in zip(sparse_power, selected.iterrows()):
+        recon += float(w) * fields[(int(row["m"]), int(row["n"]))]
     recon[~inside] = 0.0
-    if recon.max() > 0:
-        recon /= recon.max()
+    peak = float(recon.max())
+    if peak > 0:
+        recon /= peak
+
+    # Fit quality: compare target and reconstructed observable directly.
+    fit_a = target[inside].astype(float); fit_r = recon[inside].astype(float)
+    fit_rmse = float(np.sqrt(np.mean((fit_a - fit_r) ** 2)))
+    fit_corr = float(_corr(fit_a, fit_r))
+    relative_error = fit_rmse / max(float(np.sqrt(np.mean((fit_a - float(fit_a.mean())) ** 2))), 1e-9)
 
     selected.insert(0, "mode_rank", np.arange(1, len(selected) + 1))
-    selected["mixture_weight"] = weights
+    selected["mixture_weight"] = sparse_power
+    selected["drive_amplitude_proxy"] = np.sqrt(sparse_power)
+    selected["actuator_compensated_amplitude_proxy"] = np.sqrt(sparse_power) / np.maximum(selected["actuator_coupling"].to_numpy(float), 1e-9)
+    phys_amp = selected["actuator_compensated_amplitude_proxy"].to_numpy(float)
+    if phys_amp.max() > 0:
+        phys_amp = phys_amp / phys_amp.max()
+    selected["drive_amplitude_physical"] = phys_amp
     selected["note"] = [hz_to_note(float(f)) for f in selected["frequency_Hz"]]
+    selected["fit_rmse"] = fit_rmse
+    selected["fit_correlation"] = fit_corr
+    selected["relative_fit_error"] = relative_error
+    selected["inverse_regularization"] = float(inverse_regularization)
     return selected, recon
+
+
+def observable_to_sand_artwork(observable_image: np.ndarray, mode: str = "Displacement power") -> np.ndarray:
+    """Convert a predicted displacement observable into a sand/nodal artwork proxy.
+
+    For displacement power, particles are expected to accumulate preferentially near low
+    displacement. The returned image is therefore the normalized complement of power.
+    This is a visualization proxy, not a granular-dynamics simulation.
+    """
+    img = _resample_square(observable_image, np.asarray(observable_image).shape[0])
+    img = np.clip(img, 0.0, 1.0)
+    if mode == "Displacement power":
+        out = 1.0 - img
+    elif mode == "Displacement magnitude":
+        out = 1.0 - img
+    elif mode == "Nodal / sand":
+        out = img
+    else:
+        raise ValueError(f"Unsupported observable mode: {mode}")
+    out -= out.min()
+    peak = float(out.max())
+    if peak > 0:
+        out /= peak
+    return out
 
 
 def polar_harmonic_spectrum(image: np.ndarray, max_m: int = 32, radial_bins: int = 128) -> pd.DataFrame:
@@ -864,7 +1191,10 @@ def polar_harmonic_spectrum(image: np.ndarray, max_m: int = 32, radial_bins: int
     xx = x - cx; yy = y - cy
     r = np.hypot(xx, yy)
     theta = np.arctan2(yy, xx)
-    mask = r <= r.max()
+    # Only analyze the inscribed circular field; including the square-canvas corners
+    # would inject artificial angular harmonics unrelated to the circular resonator.
+    radius = (size - 1) / 2.0
+    mask = r <= radius
     records = []
     for m in range(0, int(max_m) + 1):
         coeff = np.sum(img[mask] * np.exp(-1j * m * theta[mask]))
@@ -877,9 +1207,25 @@ def polar_harmonic_spectrum(image: np.ndarray, max_m: int = 32, radial_bins: int
     return df
 
 
-def image_registration_metrics(reference: np.ndarray, measured: np.ndarray, threshold: float = 0.55) -> dict:
-    """Registration-aware image metrics plus boundary-distance error."""
-    ref = np.asarray(reference, dtype=float)
+def _translate_image(meas: np.ndarray, dx: int, dy: int) -> np.ndarray:
+    shifted = np.zeros_like(meas)
+    y0 = max(0, dy); y1 = min(meas.shape[0], meas.shape[0] + dy)
+    x0 = max(0, dx); x1 = min(meas.shape[1], meas.shape[1] + dx)
+    sy0 = max(0, -dy); sy1 = sy0 + (y1 - y0)
+    sx0 = max(0, -dx); sx1 = sx0 + (x1 - x0)
+    if y1 > y0 and x1 > x0:
+        shifted[y0:y1, x0:x1] = meas[sy0:sy1, sx0:sx1]
+    return shifted
+
+
+def image_registration_metrics(reference: np.ndarray, measured: np.ndarray, threshold: float = 0.55, rotation_step_deg: float = 5.0) -> dict:
+    """Registration-aware image metrics with translation + in-plane rotation search.
+
+    Rotation is especially important for circular cymatics images because the camera can
+    be rotated arbitrarily relative to the DNA-derived target. The search is an image
+    registration operation; it is not a scientific acceptance score.
+    """
+    ref = np.asarray(reference, dtype=float).copy()
     meas = np.asarray(measured, dtype=float)
     if ref.ndim != 2 or meas.ndim != 2:
         raise ValueError("Images must be grayscale 2-D arrays")
@@ -887,21 +1233,22 @@ def image_registration_metrics(reference: np.ndarray, measured: np.ndarray, thre
     ref -= ref.min(); meas -= meas.min()
     if ref.max() > 0: ref /= ref.max()
     if meas.max() > 0: meas /= meas.max()
-    # Search integer pixel translations around the center to compensate for camera framing.
-    best = None
+    if rotation_step_deg <= 0:
+        rotation_step_deg = 360.0
+    angles = np.arange(0.0, 360.0, float(rotation_step_deg))
     lim = max(2, ref.shape[0] // 20)
-    for dy in range(-lim, lim + 1, max(1, lim // 10)):
-        for dx in range(-lim, lim + 1, max(1, lim // 10)):
-            shifted = np.zeros_like(meas)
-            y0 = max(0, dy); y1 = min(ref.shape[0], ref.shape[0] + dy)
-            x0 = max(0, dx); x1 = min(ref.shape[1], ref.shape[1] + dx)
-            sy0 = max(0, -dy); sy1 = sy0 + (y1 - y0)
-            sx0 = max(0, -dx); sx1 = sx0 + (x1 - x0)
-            shifted[y0:y1, x0:x1] = meas[sy0:sy1, sx0:sx1]
-            corr = _corr(ref, shifted)
-            if best is None or corr > best[0]:
-                best = (corr, dx, dy, shifted)
-    _, dx, dy, aligned = best
+    step_px = max(1, lim // 10)
+    best = None
+    for angle in angles:
+        rotated = rotate(meas, float(angle), reshape=False, order=1, mode="constant", cval=0.0, prefilter=False)
+        # A coarse translation search is sufficient after the camera image is square-cropped.
+        for dy in range(-lim, lim + 1, step_px):
+            for dx in range(-lim, lim + 1, step_px):
+                shifted = _translate_image(rotated, dx, dy)
+                corr = _corr(ref, shifted)
+                if best is None or corr > best[0]:
+                    best = (corr, dx, dy, float(angle), shifted)
+    _, dx, dy, angle, aligned = best
     mse = float(np.mean((ref - aligned) ** 2))
     rmse = math.sqrt(mse)
     corr = _corr(ref, aligned)
@@ -930,45 +1277,167 @@ def image_registration_metrics(reference: np.ndarray, measured: np.ndarray, thre
         "95th-percentile nodal boundary distance (pixels)": hd95,
         "registration_dx_pixels": int(dx),
         "registration_dy_pixels": int(dy),
+        "registration_rotation_deg": float(angle),
         "angular-harmonic correlation": float(harmonic_corr),
         "aligned_image": aligned,
     }
+
+
+def apply_resonator_calibration(mode_table: pd.DataFrame, csv_path: str, max_delta_hz: float = 250.0) -> pd.DataFrame:
+    """Attach measured resonance frequencies/response from a user calibration CSV.
+
+    Expected CSV columns: `frequency_Hz` and optionally `response`. The nearest measured
+    resonance is assigned to each theoretical mode when within max_delta_hz. The shape
+    fit remains based on the mathematical mode family; only the physical drive frequency
+    is replaced by the measured resonance when available.
+    """
+    if mode_table.empty:
+        return mode_table.copy()
+    if not csv_path:
+        return mode_table.copy()
+    cal = pd.read_csv(csv_path)
+    cols = {c.lower().strip(): c for c in cal.columns}
+    fcol = cols.get("frequency_hz") or cols.get("frequency")
+    if not fcol:
+        raise ValueError("Calibration CSV must contain a frequency_Hz or frequency column.")
+    rf = pd.to_numeric(cal[fcol], errors="coerce").to_numpy(float)
+    valid = np.isfinite(rf) & (rf > 0)
+    if not np.any(valid):
+        raise ValueError("Calibration CSV contains no positive frequencies.")
+    rf = rf[valid]
+    response = None
+    if "response" in cols:
+        response = pd.to_numeric(cal.loc[valid, cols["response"]], errors="coerce").to_numpy(float)
+        response = np.where(np.isfinite(response), np.maximum(response, 0.0), 0.0)
+    out = mode_table.copy()
+    assigned = []; resp = []; delta = []
+    tol = float(max_delta_hz)
+    for f in out["frequency_Hz"].to_numpy(float):
+        j = int(np.argmin(np.abs(rf - f)))
+        d = float(abs(rf[j] - f))
+        if d <= tol:
+            assigned.append(float(rf[j]))
+            resp.append(float(response[j]) if response is not None else 1.0)
+            delta.append(d)
+        else:
+            assigned.append(float(f)); resp.append(0.0); delta.append(d)
+    out["drive_frequency_Hz"] = assigned
+    out["calibration_response"] = resp
+    out["calibration_delta_Hz"] = delta
+    out["calibrated"] = [d <= tol for d in delta]
+    # If measured response is supplied, use it as a soft coupling factor. It is not a
+    # complete FRF/Q model, but it prevents driving frequencies with essentially no measured response.
+    if response is not None and np.max(out["calibration_response"].to_numpy(float)) > 0:
+        r = out["calibration_response"].to_numpy(float)
+        out["mixture_weight_calibrated"] = out["mixture_weight"].to_numpy(float) * (r / max(float(r.max()), 1e-12))
+    else:
+        out["mixture_weight_calibrated"] = out["mixture_weight"].to_numpy(float)
+    calibrated_power = np.maximum(out["mixture_weight_calibrated"].to_numpy(float), 0.0)
+    if calibrated_power.max() > 0:
+        calibrated_power = calibrated_power / float(calibrated_power.sum())
+    out["drive_amplitude_calibrated"] = np.sqrt(calibrated_power)
+    out["drive_amplitude_calibrated"] = out["drive_amplitude_calibrated"] / max(float(out["drive_amplitude_calibrated"].max()), 1e-12)
+    # Preserve actuator controllability compensation after calibration. Measured response
+    # changes the required power weighting, while coupling still affects how efficiently
+    # a specific point actuator excites the selected mode.
+    phys = np.sqrt(calibrated_power) / np.maximum(out["actuator_coupling"].to_numpy(float), 1e-9)
+    out["drive_amplitude_physical_calibrated"] = phys / max(float(phys.max()), 1e-12)
+    return out
+
+
+def _fade_envelope(n: int, sr: int, attack_s: float = 0.05, release_s: float = 0.12) -> np.ndarray:
+    if n <= 0:
+        return np.empty(0, dtype=float)
+    env = np.ones(n, dtype=float)
+    a = min(n, max(1, int(round(float(attack_s) * sr))))
+    r = min(n, max(1, int(round(float(release_s) * sr))))
+    env[:a] = np.linspace(0.0, 1.0, a, endpoint=False)
+    env[-r:] *= np.linspace(1.0, 0.0, r, endpoint=True)
+    return env
 
 
 def create_physical_drive_audio(
     mode_table: pd.DataFrame,
     duration_per_mode_s: float = 3.0,
     sample_rate: int = 44_100,
-    amplitude_column: str = "mixture_weight",
+    amplitude_column: str = "drive_amplitude_proxy",
     use_exact_frequencies: bool = True,
+    frequency_column: str = "frequency_Hz",
 ) -> tuple[np.ndarray, list[dict]]:
-    """Generate a one-mode-at-a-time physical-drive WAV.
-
-    Frequencies are not quantized. This output is intended for a calibrated
-    resonator experiment, not for conventional musical listening.
-    """
+    """Generate a sequential mode sweep using exact physical frequencies."""
     if mode_table.empty:
         raise ValueError("No modes available")
-    sr = int(sample_rate)
-    d = float(duration_per_mode_s)
+    sr = int(sample_rate); d = float(duration_per_mode_s)
+    if d <= 0:
+        raise ValueError("duration_per_mode_s must be positive")
     total = int(round(len(mode_table) * d * sr))
     out = np.zeros(total, dtype=np.float64)
     events: list[dict] = []
-    for i, row in mode_table.iterrows():
-        f = float(row["frequency_Hz"] if use_exact_frequencies else row.get("note_Hz", row["frequency_Hz"]))
+    for idx, (_, row) in enumerate(mode_table.iterrows()):
+        freq_key = frequency_column if frequency_column in row.index else "frequency_Hz"
+        f = float(row[freq_key] if use_exact_frequencies else row.get("note_Hz", row[freq_key]))
         amp = float(row.get(amplitude_column, 1.0))
-        start = int(round(i * d * sr)); n = min(int(round(d * sr)), total - start)
+        start = int(round(idx * d * sr)); n = min(int(round(d * sr)), total - start)
         if n <= 0 or f <= 0 or f >= sr / 2:
             continue
         t = np.arange(n, dtype=float) / sr
-        attack = min(0.1, d / 5.0)
-        release = min(0.15, d / 5.0)
-        env = np.minimum(1.0, t / max(attack, 1e-6)) * np.minimum(1.0, (d - t) / max(release, 1e-6))
+        env = _fade_envelope(n, sr)
         out[start:start+n] += amp * env * np.sin(2.0 * math.pi * f * t)
-        events.append({"index": int(i + 1), "start_s": float(i * d), "duration_s": d, "frequency_Hz": f, "amplitude": amp})
+        events.append({"index": int(idx + 1), "start_s": float(idx * d), "duration_s": d, "frequency_Hz": f, "amplitude_proxy": amp})
     peak = float(np.max(np.abs(out)))
     if peak > 0: out = 0.95 * out / peak
     return out.astype(np.float32), events
+
+
+def create_simultaneous_physical_drive_audio(
+    mode_table: pd.DataFrame,
+    duration_s: float = 12.0,
+    sample_rate: int = 44_100,
+    amplitude_column: str = "drive_amplitude_physical",
+    phase_lock: bool = True,
+    frequency_column: str = "frequency_Hz",
+    weight_column: str = "drive_amplitude_physical",
+) -> tuple[np.ndarray, list[dict]]:
+    """Generate the simultaneous multi-tone drive intended to reproduce the fitted target.
+
+    The inverse model fits observable power, so drive amplitude is approximately the
+    square root of modal mixture weight, adjusted by the geometric actuator-coupling
+    proxy. Exact mode frequencies are retained; no musical quantization is applied.
+    """
+    if mode_table.empty:
+        raise ValueError("No modes available")
+    sr = int(sample_rate); duration_s = float(duration_s)
+    if duration_s <= 0:
+        raise ValueError("duration_s must be positive")
+    total = int(round(duration_s * sr))
+    t = np.arange(total, dtype=float) / sr
+    audio = np.zeros(total, dtype=float)
+    selected_weight_column = weight_column if weight_column in mode_table.columns else amplitude_column
+    if selected_weight_column in mode_table.columns:
+        raw_amps = np.asarray(mode_table[selected_weight_column], dtype=float)
+    else:
+        raw_amps = np.sqrt(np.asarray(mode_table.get("mixture_weight", np.ones(len(mode_table))), dtype=float))
+    raw_amps = np.maximum(raw_amps, 0.0)
+    if raw_amps.max() > 0:
+        raw_amps = raw_amps / raw_amps.max()
+    events: list[dict] = []
+    for i, (_, row) in enumerate(mode_table.iterrows()):
+        freq_key = frequency_column if frequency_column in row.index else "frequency_Hz"
+        f = float(row[freq_key])
+        if f <= 0 or f >= sr / 2:
+            continue
+        amp = float(raw_amps[i])
+        phase = 0.0 if phase_lock else 2.0 * math.pi * ((i * 0.173) % 1.0)
+        audio += amp * np.sin(2.0 * math.pi * f * t + phase)
+        events.append({
+            "mode_index": int(i + 1), "frequency_Hz": f, "relative_amplitude": amp,
+            "phase_deg": float(math.degrees(phase)), "duration_s": duration_s,
+        })
+    env = _fade_envelope(total, sr, attack_s=0.20, release_s=0.25)
+    audio *= env
+    peak = float(np.max(np.abs(audio)))
+    if peak > 0: audio = 0.92 * audio / peak
+    return audio.astype(np.float32), events
 
 
 def create_musical_audio_from_modes(
@@ -977,36 +1446,59 @@ def create_musical_audio_from_modes(
     sample_rate: int = 44_100,
     tempo_bpm: float = 96.0,
     quantization: str = "chromatic",
-    harmonic_order: int = 3,
+    harmonic_order: int = 4,
 ) -> tuple[np.ndarray, list[dict]]:
-    """Map physical mode frequencies to musical pitches while retaining order/weights."""
+    """Create a listening/Suno-oriented sonification from the physical mode spectrum.
+
+    Unlike the physical drive, this intentionally remaps the logarithmic frequency
+    relationships into a comfortable musical register. It preserves interval ratios
+    as much as possible, but it is not a physical excitation signal.
+    """
     if mode_table.empty:
         raise ValueError("No modes available")
     sr = int(sample_rate); total = int(round(float(duration_s) * sr))
     beat = 60.0 / max(float(tempo_bpm), 1.0)
-    note_len = beat
+    mode_count = len(mode_table)
+    physical = np.asarray(mode_table["frequency_Hz"], dtype=float)
+    f_ref = max(float(np.min(physical[physical > 0])), 1.0)
+    # Preserve logarithmic relationships while placing the result around A3/A4.
+    musical_base = 220.0
+    weights = np.asarray(mode_table.get("mixture_weight", np.ones(mode_count)), dtype=float)
+    weights = np.sqrt(np.maximum(weights, 0.0))
+    weights = weights / max(float(weights.max()), 1e-9)
     audio = np.zeros(total, dtype=float)
     events: list[dict] = []
-    weights = np.asarray(mode_table.get("mixture_weight", np.ones(len(mode_table))), dtype=float)
-    weights = weights / max(float(weights.max()), 1e-9)
+    note_len = max(0.25, beat)
     for idx, (_, row) in enumerate(mode_table.iterrows()):
-        physical = float(row["frequency_Hz"])
-        musical = physical
+        f_phys = max(float(row["frequency_Hz"]), 1e-9)
+        ratio = f_phys / f_ref
+        f_mus = musical_base * ratio
+        # Keep generated notes inside a practical musical register by octave folding.
+        while f_mus < 110.0: f_mus *= 2.0
+        while f_mus > 880.0: f_mus /= 2.0
         if quantization == "chromatic":
-            musical, note = quantize_frequency(physical, "chromatic")
+            f_render, note = quantize_frequency(f_mus, "chromatic")
+        elif quantization == "none":
+            f_render, note = f_mus, hz_to_note(f_mus)
         else:
-            note = hz_to_note(musical)
+            raise ValueError("quantization must be 'chromatic' or 'none'.")
         start = int(round((idx * note_len) * sr)) % total
-        n = min(int(round(note_len * 0.9 * sr)), total - start)
-        if n <= 0 or musical <= 0 or musical >= sr / 2: continue
+        n = min(int(round(note_len * 0.88 * sr)), total - start)
+        if n <= 0 or f_render <= 0 or f_render >= sr / 2: continue
         t = np.arange(n, dtype=float) / sr
-        env = np.minimum(1.0, t / 0.025) * np.minimum(1.0, (note_len * 0.9 - t) / 0.08)
-        signal = np.sin(2 * math.pi * musical * t)
-        for h in range(2, max(1, int(harmonic_order)) + 1):
-            signal += (1.0 / h) * np.sin(2 * math.pi * musical * h * t)
-        signal /= sum(1.0 / h for h in range(1, max(1, int(harmonic_order)) + 1))
-        audio[start:start+n] += (0.15 + 0.32 * weights[idx]) * env * signal
-        events.append({"mode_index": idx + 1, "physical_frequency_Hz": physical, "musical_frequency_Hz": float(musical), "note": note})
+        env = _fade_envelope(n, sr, attack_s=0.03, release_s=min(0.12, note_len * 0.25))
+        signal = np.zeros(n, dtype=float)
+        H = max(1, int(harmonic_order))
+        for h in range(1, H + 1):
+            signal += (1.0 / h) * np.sin(2.0 * math.pi * f_render * h * t)
+        signal /= sum(1.0 / h for h in range(1, H + 1))
+        amp = 0.12 + 0.34 * float(weights[idx])
+        audio[start:start+n] += amp * env * signal
+        events.append({
+            "mode_index": idx + 1, "physical_frequency_Hz": f_phys,
+            "musical_frequency_Hz": float(f_render), "note": note,
+            "relative_mode_weight": float(weights[idx]),
+        })
     peak = float(np.max(np.abs(audio)))
     if peak > 0: audio = 0.92 * audio / peak
     return audio.astype(np.float32), events

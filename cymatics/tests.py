@@ -22,8 +22,15 @@ from dna_cymatics import (
     clean_sequence,
     circular_membrane_mode_field,
     circular_membrane_mode_frequency,
+    circular_clamped_plate_eigenvalue,
+    circular_clamped_plate_mode_frequency,
+    circular_clamped_plate_mode_field,
+    prepare_resonator_target,
+    observable_to_sand_artwork,
     create_musical_audio_from_modes,
     create_physical_drive_audio,
+    create_simultaneous_physical_drive_audio,
+    apply_resonator_calibration,
     image_registration_metrics,
     polar_harmonic_spectrum,
     rank_circular_membrane_modes,
@@ -106,6 +113,9 @@ def test_geometry_and_atomic_projection():
     assert one_turn.image.shape == (160, 160)
     folded = atomic_density_projection(atomic, mode="Helical phase-folded density", size=128, blur_A=0.2)
     assert folded.image.shape == (128, 128)
+    rolling = atomic_density_projection(atomic, mode="Rolling-turn ensemble axial density", size=128, blur_A=0.2, helical_pitch_A=34.0)
+    assert rolling.image.shape == (128, 128)
+    assert np.isfinite(rolling.image).all()
     edges = atomic_edge_target(one_turn.image)
     assert edges.shape == one_turn.image.shape
     assert np.isfinite(edges).all()
@@ -145,24 +155,65 @@ def test_circular_modes_and_audio():
     modes, recon = rank_circular_membrane_modes(target, 0.15, 120.0, max_angular_mode=8, max_radial_mode=4, top_modes=5, fit_size=96)
     assert len(modes) == 5
     assert recon.shape == (96, 96)
+    physical_mix, mix_events = create_simultaneous_physical_drive_audio(modes, duration_s=1.0)
+    assert physical_mix.ndim == 1 and mix_events
     physical, events = create_physical_drive_audio(modes, duration_per_mode_s=0.2)
     musical, mevents = create_musical_audio_from_modes(modes, duration_s=2.0, quantization="chromatic")
     assert physical.ndim == musical.ndim == 1
     assert events and mevents
 
 
+
+def test_resonator_calibration():
+    dna = build_dna_structure(SEQ)
+    target = circular_membrane_mode_field(4, 1, size=64, nodal=True)
+    modes, _ = rank_circular_membrane_modes(target, 0.15, 120.0, max_angular_mode=6, max_radial_mode=3, top_modes=3, fit_size=64)
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "cal.csv"
+        path.write_text("frequency_Hz,response\n100,0.2\n500,1.0\n1000,0.5\n", encoding="utf-8")
+        cal = apply_resonator_calibration(modes, str(path), max_delta_hz=10000)
+        assert "drive_frequency_Hz" in cal.columns
+        assert "calibration_response" in cal.columns
+        assert cal["calibrated"].all()
+
+
+def test_clamped_plate_physics_and_inverse():
+    # Fundamental clamped circular plate frequency for a 300-mm diameter, 1-mm steel
+    # plate should be close to the analytical benchmark (~110.5 Hz for nu≈0.30).
+    lam = circular_clamped_plate_eigenvalue(0, 1)
+    assert 3.0 < lam < 3.5
+    f = circular_clamped_plate_mode_frequency(0, 1, 0.15, 0.001, 200e9, 7850.0, 0.30)
+    assert 109.0 < f < 112.5
+    field = circular_clamped_plate_mode_field(4, 2, size=96, nodal=False)
+    assert field.shape == (96, 96) and np.isfinite(field).all()
+    target = prepare_resonator_target(field, smoothing_px=2.0)
+    modes, recon = rank_circular_membrane_modes(
+        target, 0.15, 120.0, max_angular_mode=8, max_radial_mode=4, top_modes=4,
+        fit_size=64, resonator_model="Clamped circular thin plate",
+        plate_thickness_m=0.001, plate_young_pa=200e9, plate_density_kg_m3=7850.0, plate_poisson=0.30,
+        target_type="Displacement power", candidate_pool=12, inverse_regularization=0.001,
+    )
+    assert len(modes) == 4
+    assert (modes["frequency_Hz"] > 0).all()
+    assert "radial_eigenvalue" in modes.columns
+    sand = observable_to_sand_artwork(recon, "Displacement power")
+    assert sand.shape == recon.shape and np.isfinite(sand).all()
+
 def test_harmonics_and_registration():
     dna = build_dna_structure(SEQ)
     target = atomic_density_projection(build_parametric_atomic_dna(dna, dna_form="B-DNA"), size=128).image
     harmonics = polar_harmonic_spectrum(target, max_m=16)
     assert len(harmonics) == 17
-    result = image_registration_metrics(target, np.roll(target, 2, axis=1), threshold=0.55)
+    from scipy.ndimage import rotate
+    rotated = rotate(target, 25, reshape=False, order=1, mode="constant", prefilter=False)
+    result = image_registration_metrics(target, np.roll(rotated, 2, axis=1), threshold=0.55, rotation_step_deg=5.0)
     assert "RMSE" in result
     assert "angular-harmonic correlation" in result
-    assert result["Pearson spatial correlation"] > 0.9
+    assert result["Pearson spatial correlation"] > 0.85
+    assert "registration_rotation_deg" in result
 
 
 if __name__ == "__main__":
     test_sequence(); test_hoxb1a_canonical(); test_sequence_source_helpers(); test_sequence_bundle_write()
-    test_geometry_and_atomic_projection(); test_structure_source_contract(); test_internal_parametric_builder(); test_circular_modes_and_audio(); test_harmonics_and_registration()
+    test_geometry_and_atomic_projection(); test_structure_source_contract(); test_internal_parametric_builder(); test_circular_modes_and_audio(); test_clamped_plate_physics_and_inverse(); test_resonator_calibration(); test_harmonics_and_registration()
     print("All tests passed.")

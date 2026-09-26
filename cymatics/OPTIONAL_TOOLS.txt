@@ -1,23 +1,26 @@
-DNA CYMATICS — OPTIONAL TOOLS
+OPTIONAL TOOLS
+==============
 
-The application has no required external molecular builder.
+The core application has no external molecular-builder dependency.
 
-1. PDB/mmCIF source data
-   Use an experimentally determined or externally validated structure whenever
-   one is available for the sequence or a close structural analogue.
+Optional inputs/tools:
 
-2. Biopython
-   Already listed in requirements.txt. It is used for PDB/mmCIF parsing and does
-   not build the sequence-only model.
+1. PDB/mmCIF structure files
+   - Preferred when an experimental structure for the sequence/conformation exists.
+   - Uploaded coordinates are used directly by the projection layer.
 
-3. Gemmi (optional future adapter)
-   Gemmi is an open-source crystallographic/mmCIF library that could be added as
-   an alternative parser in a future release. It is not required by the current
-   build.
+2. NCBI / Ensembl / ZFIN network access
+   - Used only for automatic current-sequence retrieval.
+   - The bundled hoxb1a-201 sequence makes the core workflow usable offline.
 
-4. Numerical acceleration
-   The current implementation uses NumPy/SciPy vectorization. No GPU or compiled
-   molecular-dynamics engine is required for the sequence-only geometry path.
+3. Camera + image capture
+   - Required only for physical cymatics verification.
 
+4. Accelerometer, laser vibrometer, microphone, or electrical response measurement
+   - Strongly recommended for resonator calibration.
+   - These measurements can be reduced to the calibration CSV format supported by the app.
 
-No external molecular structure builder is required. The production sequence-only 3D path is implemented in pure Python. Optional PDB/mmCIF upload support uses Biopython for parsing.
+Not required:
+- External molecular builders
+- Molecular dynamics packages
+- Quantum chemistry packages

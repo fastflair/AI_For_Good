@@ -1,65 +1,134 @@
-# Internal Sequence-to-3D Heavy-Atom Algorithm
+# Build Algorithm
 
-## Design goal
-
-Create a deterministic 3D coordinate field from a DNA sequence without depending on
-an external molecular builder.
-
-## Coordinate frames
-
-Each base pair receives a local helical frame:
+## End-to-end pipeline
 
 ```text
-x = radial direction
- y = tangential direction
- z = helix axis
+DNA sequence
+    ↓
+sequence validation + provenance
+    ↓
+3-D coarse sequence geometry
+    ↓
+explicit heavy-atom parametric model OR uploaded PDB/mmCIF
+    ↓
+axis alignment
+    ↓
+atomic-density rasterization
+    ↓
+2-D molecular target
+    ↓
+sequence-wide rolling-turn / phase folding
+    ↓
+resonator conditioning
+    ↓
+spatial spectrum + polar harmonics
+    ↓
+ideal circular resonator mode library
+    ↓
+orientation matching + actuator coupling
+    ↓
+regularized NNLS inverse fit
+    ↓
+sparse top-N re-fit
+    ↓
+exact physical frequencies + amplitudes
+    ↓
+physical WAV + musical WAV
+    ↓
+optional physical camera verification
 ```
 
-The global axis rotates by the helical twist and advances by the helical rise.
-Local inclination changes the base-plane normal but is not fed back into the global
-axis. This prevents long sequences from developing an artificial macroscopic bend.
+## Canonical projection
 
-## Base placement
+The default projection is `Rolling-turn ensemble axial density`.
 
-Each base is represented by its standard heavy-atom names. Base-specific 2D templates
-approximate the ring layout. A small local scale factor preserves the distinction
-between purines and pyrimidines.
+Let each atom have aligned coordinates `(x,y,z)` and a sequence-associated helical phase `theta_bp`. For each sliding window start `s`, rotate the window by `-theta_s` so all windows share a common phase origin. Rasterize the transformed atoms and average/accumulate them.
 
-## Sugar placement
+The resulting target is sequence-wide:
 
-Each nucleotide receives a seven-site sugar template. Small axial offsets represent a
-puckered sugar rather than a perfectly planar ring.
+`T(x,y) = aggregate_s density_s(x,y)`
 
-## Phosphate placement
+Unlike a single-turn crop, every eligible base-pair window contributes.
 
-Each nucleotide receives P, O1P, O2P and O5P sites on the outer helical backbone.
-The coordinates are arranged so the phosphate cloud follows the helical envelope.
+## Atom rasterization
 
-## Sequence dependence
+Each atom contributes a normalized weight `w_i`:
 
-For B-DNA, local dinucleotide parameters provide sequence-dependent twist and rise.
-Shift and slide are applied as a restrained transverse modulation. The cumulative
-transverse displacement is centered so that it does not create an arbitrary drift.
+`w_i ∈ {1, mass_i, Z_i, vdw_i^3}`
 
-## Conformational families
+The default atom footprint is a Gaussian with standard deviation based on the atom's van-der-Waals radius plus user-selected blur.
 
-The idealized presets change rise, twist, diameter/radius, handedness and base
-inclination for A-, B-, C- and Z-form explorations.
+## Resonator conditioning
 
-## Output
+```text
+T → min/max normalization
+  → Gaussian low-pass
+  → circular aperture/taper
+```
 
-The resulting coordinate set is an `AtomicStructure` with:
+This prevents the inverse solver from wasting modes on atom-scale detail that a millimeter-scale plate cannot represent.
 
-- `atoms`: Nx3 coordinates in Å,
-- `elements`: element symbols,
-- `names`: standard atom names,
-- `residues`: residue/base labels,
-- `source`: provenance string,
-- `dna_form`: selected conformational family,
-- `metadata`: model assumptions and warnings.
+## Circular thin-plate modes
 
-## Scientific status
+For mode `(m,n)`, solve
 
-This is a geometry hypothesis generator. It is not intended to replace experimental
-coordinates, crystallographic rebuilding, molecular dynamics, or force-field
-minimization when quantitative chemistry is required.
+`J'_m(lambda) I_m(lambda) - J_m(lambda) I'_m(lambda) = 0`
+
+for the appropriate positive root. Build
+
+`phi = [J_m(lambda r) + B I_m(lambda r)] cos(m theta - theta0)`
+
+with
+
+`B = -J_m(lambda)/I_m(lambda)`.
+
+Frequency:
+
+`f_mn = lambda_mn^2/(2*pi*R^2) * sqrt(D/(rho*h))`
+
+where
+
+`D = E h^3/[12(1-nu^2)]`.
+
+## Mode orientation
+
+For `m > 0`, cosine/sine partners share the same ideal frequency. The app samples orientation `theta0` over the requested angular grid and keeps the orientation with the highest target correlation.
+
+For a real plate, imperfections and mounting can split or rotate nominally degenerate mode families. Calibration is therefore more authoritative than the ideal analytical orientation.
+
+## Actuator coupling
+
+A point-actuator proxy evaluates the modal displacement at `(r0,theta0_actuator)`. Low-coupling modes are downweighted during inverse fitting.
+
+This is not a full finite-element transfer function.
+
+## Sparse inverse fitting
+
+For selected mode basis columns `A` and target vector `b`, solve
+
+`min ||A x - b||_2^2 + lambda ||x||_2^2`
+
+subject to
+
+`x >= 0`.
+
+The L2 term is implemented through NNLS augmentation. The strongest contributors are retained and then re-fit in the sparse basis.
+
+## Audio
+
+The physical drive preserves the exact modeled/measured frequencies. Amplitude is derived from modal power and actuator coupling.
+
+The musical renderer separately maps the logarithmic ratios into a useful musical register and may quantize to chromatic pitch.
+
+## Verification
+
+A measured camera image is normalized, resized, rotated, translated, and compared with the selected reference target. Metrics include:
+
+- RMSE
+- Pearson spatial correlation
+- Dice
+- IoU
+- 95th percentile boundary distance
+- angular-harmonic correlation
+
+Registration is intended to remove camera alignment nuisance variables. It is not evidence of causal equivalence by itself.

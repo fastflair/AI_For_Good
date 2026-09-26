@@ -1,4 +1,5 @@
-# Tested in the build environment used for this release.
+# DNA Cymatics v0.10
+# Core workflow is self-contained; no external molecular-builder or molecular-dynamics package is required.
 # Python 3.11+ recommended.
 gradio>=6.0,<7
 numpy>=2.0,<3

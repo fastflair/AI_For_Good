@@ -17,6 +17,9 @@ except ImportError:  # Optional: only required for uploaded PDB/mmCIF files.
 BASES = set("ACGT")
 ELEMENT_MASS = {"H": 1.008, "C": 12.011, "N": 14.007, "O": 15.999, "P": 30.974, "S": 32.06}
 ELEMENT_Z = {"H": 1.0, "C": 6.0, "N": 7.0, "O": 8.0, "P": 15.0, "S": 16.0}
+# Approximate van der Waals radii (Å), used only to render an atomic-density field.
+# These are visualization kernels, not bond radii or force-field parameters.
+ELEMENT_VDW_RADIUS_A = {"H": 1.20, "C": 1.70, "N": 1.55, "O": 1.52, "P": 1.80, "S": 1.80}
 
 
 class AtomicStructureError(RuntimeError):
@@ -36,6 +39,8 @@ class AtomicStructure:
     source: str
     dna_form: str
     metadata: dict[str, str] = field(default_factory=dict)
+    bp_indices: tuple[int, ...] | None = None
+    bp_phase_deg: tuple[float, ...] | None = None
 
     @property
     def n_atoms(self) -> int:
@@ -312,12 +317,14 @@ def build_parametric_atomic_dna(dna_structure, dna_form: str = "B-DNA") -> Atomi
     elements: list[str] = []
     names: list[str] = []
     residues: list[str] = []
+    bp_indices: list[int] = []
 
-    def add(atom_xyz, element: str, atom_name: str, residue: str) -> None:
+    def add(atom_xyz, element: str, atom_name: str, residue: str, bp_index: int) -> None:
         points.append(np.asarray(atom_xyz, dtype=float))
         elements.append(element)
         names.append(atom_name)
         residues.append(residue)
+        bp_indices.append(int(bp_index))
 
     # Convert local (radial, tangential, axial) coordinates into global XYZ.
     def place(frame: np.ndarray, origin: np.ndarray, q: Iterable[float]) -> np.ndarray:
@@ -342,18 +349,18 @@ def build_parametric_atomic_dna(dna_structure, dna_form: str = "B-DNA") -> Atomi
             for atom_name, element, x, y in BASE_TEMPLATES[display_base]:
                 qx = x * base_flip
                 qy = y
-                add(place(frame, base_origin, (qx, qy, 0.0)), element, atom_name, f"{display_base}{i+1:04d}")
+                add(place(frame, base_origin, (qx, qy, 0.0)), element, atom_name, f"{display_base}{i+1:04d}", i + 1)
 
             # Sugar sits between the base and phosphate backbone. RNA receives O2'.
             sugar_origin = axis_center + frame[:, 0] * (strand_sign * 5.8) + frame[:, 2] * 0.0
             sugar_template = RNA_SUGAR_TEMPLATE if dna_form == "A-RNA" else SUGAR_TEMPLATE
             for atom_name, element, x, y, zz in sugar_template:
-                add(place(frame, sugar_origin, (x * 0.72, y * 0.72, zz)), element, atom_name, f"{display_base}{i+1:04d}")
+                add(place(frame, sugar_origin, (x * 0.72, y * 0.72, zz)), element, atom_name, f"{display_base}{i+1:04d}", i + 1)
 
             # Phosphate is placed on the outer backbone, slightly advanced along z.
             phosphate_origin = axis_center + frame[:, 0] * (strand_sign * 9.6) + frame[:, 2] * (0.9 if strand_sign > 0 else -0.9)
             for atom_name, element, x, y, zz in PHOSPHATE_TEMPLATE:
-                add(place(frame, phosphate_origin, (x * 0.85, y * 0.85, zz)), element, atom_name, f"{b}{i+1:04d}")
+                add(place(frame, phosphate_origin, (x * 0.85, y * 0.85, zz)), element, atom_name, f"{b}{i+1:04d}", i + 1)
 
     atoms = np.vstack(points) if points else np.empty((0, 3), dtype=float)
     return AtomicStructure(
@@ -370,7 +377,10 @@ def build_parametric_atomic_dna(dna_structure, dna_form: str = "B-DNA") -> Atomi
             "model_status": "geometry reference for visualization/projection; not force-field minimized",
             "sequence_dependence": "B-DNA uses local twist/rise and small shift/slide modulation from the built-in dinucleotide model",
             "macroscopic_axis": "kept straight; local inclination/handedness do not accumulate into global curvature",
+            "phase_reference": "per-base-pair cumulative twist stored for sequence-aware helical folding",
         },
+        tuple(bp_indices),
+        tuple(float(v) for v in theta_deg),
     )
 
 
@@ -445,63 +455,174 @@ def atomic_density_projection(
     blur_A: float = 0.35,
     point_weighting: str = "Uniform",
     helical_pitch_A: float = 33.8,
+    atom_kernel: str = "Element VDW Gaussian",
+    window_start_bp: int = 1,
+    turn_bp: int | None = None,
 ) -> AtomicProjection:
-    """Render every modeled atom into a square 2-D density field."""
+    """Render every heavy atom into a calibrated transverse 2-D density field.
+
+    The axial projection looks down the molecular axis. The phase-folded projection
+    uses the atom's base-pair-specific helical phase when available, so the complete
+    sequence contributes to a common one-turn coordinate frame instead of selecting
+    an arbitrary central 34 Å window. For uploaded structures without base-pair index
+    metadata, the phase is estimated from z/pitch as an explicitly approximate fallback.
+    """
     if not 64 <= int(size) <= 2048:
-        raise ValueError("Atomic projection size must be between 64 and 2048 pixels.")
+        raise ValueError("Projection size must be between 64 and 2048 pixels.")
     if blur_A < 0:
         raise ValueError("blur_A must be non-negative.")
-    if point_weighting not in {"Uniform", "Atomic mass", "Electron count proxy"}:
+    if point_weighting not in {"Uniform", "Atomic mass", "Electron count proxy", "VDW volume"}:
         raise ValueError("Unsupported atom weighting")
-    valid_modes = {"Axial atomic density", "Helical phase-folded density", "Single-turn axial density", "Best-fit axial PCA"}
+    if atom_kernel not in {"Point Gaussian", "Element VDW Gaussian"}:
+        raise ValueError("Unsupported atom kernel")
+    valid_modes = {"Axial atomic density", "Single-turn axial density", "Helical phase-folded density", "Rolling-turn ensemble axial density", "Best-fit axial PCA"}
     if mode not in valid_modes:
         raise ValueError("Unsupported atomic projection mode")
 
     aligned, _, _ = align_atomic_structure(structure)
-    if mode == "Helical phase-folded density":
-        p = _phase_fold(aligned, helical_pitch_A)
-        elems = np.asarray(structure.elements, dtype=object)
+    elems_all = np.asarray(structure.elements, dtype=object)
+    if mode in {"Helical phase-folded density", "Rolling-turn ensemble axial density"}:
+        p = aligned.copy()
+        if structure.bp_phase_deg is not None and structure.bp_indices is not None:
+            idx = np.asarray(structure.bp_indices, dtype=int)
+            phase_deg = np.array([structure.bp_phase_deg[max(0, min(len(structure.bp_phase_deg)-1, i-1))] for i in idx], dtype=float)
+            source_label = "sequence-aware cumulative base-pair phase"
+        else:
+            if helical_pitch_A <= 0:
+                raise ValueError("helical_pitch_A must be positive")
+            phase_deg = (360.0 * p[:, 2] / float(helical_pitch_A))
+            source_label = "z/pitch phase approximation"
+        if mode == "Helical phase-folded density":
+            phase = np.deg2rad(phase_deg)
+            c, s = np.cos(phase), np.sin(phase)
+            x = p[:, 0] * c + p[:, 1] * s
+            y = -p[:, 0] * s + p[:, 1] * c
+            p[:, 0], p[:, 1] = x, y
+            p[:, 2] = np.mod(p[:, 2], float(helical_pitch_A) if helical_pitch_A > 0 else 33.8)
+            elems = elems_all
+            projection_note = source_label
+        else:
+            # Sequence-wide rolling-turn ensemble: every sliding ~one-turn window
+            # contributes to the same canonical angular frame. This preserves a
+            # sequence-wide 2-D signature while producing the circular cross-section
+            # seen in axial structural depictions. It is a derived signature, not a
+            # literal camera image of the entire gene.
+            idx = np.asarray(structure.bp_indices, dtype=int) if structure.bp_indices is not None else np.clip(np.rint((p[:,2] - p[:,2].min()) / max(float(helical_pitch_A), 1e-6) * 10.5).astype(int) + 1, 1, len(np.asarray(p)))
+            n_bp = int(max(2, round(360.0 / max(float(np.mean(np.diff(np.asarray(structure.bp_phase_deg, dtype=float)))) if structure.bp_phase_deg is not None else 34.0, 1e-6))))
+            n_bp = min(n_bp, int(idx.max() - idx.min() + 1))
+            n_windows = max(1, int(idx.max()) - n_bp + 2)
+            phases = np.asarray(structure.bp_phase_deg, dtype=float) if structure.bp_phase_deg is not None else np.linspace(0.0, 360.0 * (n_windows-1) / max(n_windows,1), n_windows)
+            # Generate up to n_bp aligned copies per atom. Each copy corresponds to
+            # one sliding window containing that atom. This is vectorized rather than
+            # repeatedly rasterizing hundreds of windows.
+            start_min = np.maximum(1, idx - n_bp + 1)
+            start_max = np.minimum(n_windows, idx)
+            repeat_counts = np.maximum(start_max - start_min + 1, 0)
+            starts = np.concatenate([np.arange(a, b + 1, dtype=int) for a, b in zip(start_min, start_max) if b >= a])
+            atom_index = np.concatenate([np.full(int(cn), j, dtype=int) for j, cn in enumerate(repeat_counts) if cn > 0])
+            p_rep = p[atom_index].copy()
+            phase0 = np.deg2rad(phases[starts - 1])
+            c, s = np.cos(phase0), np.sin(phase0)
+            x = p_rep[:, 0] * c + p_rep[:, 1] * s
+            y = -p_rep[:, 0] * s + p_rep[:, 1] * c
+            p_rep[:, 0], p_rep[:, 1] = x, y
+            p_rep[:, 2] = np.mod(p_rep[:, 2], float(helical_pitch_A) if helical_pitch_A > 0 else 33.8)
+            p = p_rep
+            elems = elems_all[atom_index]
+            projection_note = f"sequence-wide rolling windows of {n_bp} bp; {n_windows} windows; {source_label}"
     elif mode == "Single-turn axial density":
         z = aligned[:, 2]
-        z_mid = 0.5 * (float(z.min()) + float(z.max()))
-        mask = np.abs(z - z_mid) <= float(helical_pitch_A) / 2.0
+        pitch = float(helical_pitch_A)
+        if pitch <= 0:
+            raise ValueError("helical_pitch_A must be positive")
+        if structure.bp_indices is not None:
+            idx = np.asarray(structure.bp_indices, dtype=int)
+            if structure.bp_phase_deg is not None and len(structure.bp_phase_deg) > 1:
+                mean_twist = float(np.mean(np.diff(np.asarray(structure.bp_phase_deg, dtype=float))))
+                inferred_turn_bp = int(max(2, round(360.0 / max(abs(mean_twist), 1e-6))))
+            else:
+                inferred_turn_bp = int(max(2, round(pitch / 3.4)))
+            n_turn = int(turn_bp or inferred_turn_bp)
+            start_bp = max(1, min(int(window_start_bp), int(idx.max()) - n_turn + 1))
+            mask = (idx >= start_bp) & (idx < start_bp + n_turn)
+            window_label = f"bp {start_bp}–{start_bp + n_turn - 1}"
+        else:
+            z_mid = 0.5 * (float(z.min()) + float(z.max()))
+            mask = np.abs(z - z_mid) <= pitch / 2.0
+            window_label = "central one-pitch window"
         if int(mask.sum()) < 4:
             raise AtomicStructureError("The selected one-turn window contains too few atoms.")
         p = aligned[mask]
-        elems = np.asarray(structure.elements, dtype=object)[mask]
+        elems = elems_all[mask]
+        projection_note = window_label
     else:
         p = aligned
-        elems = np.asarray(structure.elements, dtype=object)
+        elems = elems_all
+        projection_note = "literal axial projection"
 
     xy = p[:, :2]
-    lo = xy.min(axis=0); hi = xy.max(axis=0)
-    span = np.maximum(hi - lo, 1e-9)
-    # Use a symmetric canvas so the axial molecular cross-section is not stretched.
-    side = float(max(span) * 1.10)
-    center = 0.5 * (lo + hi)
-    lo2 = center - side / 2.0
-    hi2 = center + side / 2.0
+    # Center the transverse canvas using the same weights used to render the density.
+    # A bounding-box center can drift when a one-turn window contains an asymmetric
+    # base composition; the weighted centroid keeps the molecular target centered in the
+    # resonator coordinate system without altering the molecular coordinates themselves.
+    if point_weighting == "Uniform":
+        center = np.mean(xy, axis=0)
+    elif point_weighting == "Atomic mass":
+        centroid_weights = np.asarray([ELEMENT_MASS.get(e, 12.0) for e in elems], dtype=float)
+        center = np.average(xy, axis=0, weights=centroid_weights)
+    elif point_weighting == "Electron count proxy":
+        centroid_weights = np.asarray([ELEMENT_Z.get(e, 6.0) for e in elems], dtype=float)
+        center = np.average(xy, axis=0, weights=centroid_weights)
+    else:
+        centroid_weights = np.asarray([ELEMENT_VDW_RADIUS_A.get(e, 1.7) ** 3 for e in elems], dtype=float)
+        center = np.average(xy, axis=0, weights=centroid_weights)
+    xy = xy - center[None, :]
+    radial_extent = np.hypot(xy[:, 0], xy[:, 1])
+    side = float(max(radial_extent.max() * 2.0, np.max(np.ptp(xy, axis=0))) * 1.10)
+    side = max(side, 1.0)
+    lo2 = np.array([-side / 2.0, -side / 2.0], dtype=float)
+    hi2 = np.array([side / 2.0, side / 2.0], dtype=float)
+    npx = int(size)
+    edges_x = np.linspace(lo2[0], hi2[0], npx + 1)
+    edges_y = np.linspace(lo2[1], hi2[1], npx + 1)
 
     if point_weighting == "Uniform":
         weights = np.ones(len(xy), dtype=float)
     elif point_weighting == "Atomic mass":
         weights = np.asarray([ELEMENT_MASS.get(e, 12.0) for e in elems], dtype=float)
-    else:
+    elif point_weighting == "Electron count proxy":
         weights = np.asarray([ELEMENT_Z.get(e, 6.0) for e in elems], dtype=float)
+    else:
+        weights = np.asarray([ELEMENT_VDW_RADIUS_A.get(e, 1.7) ** 3 for e in elems], dtype=float)
 
-    edges_x = np.linspace(lo2[0], hi2[0], int(size) + 1)
-    edges_y = np.linspace(lo2[1], hi2[1], int(size) + 1)
-    image, _, _ = np.histogram2d(xy[:, 1], xy[:, 0], bins=(edges_y, edges_x), weights=weights)
-    if blur_A > 0:
-        px_A = side / int(size)
-        sigma_px = max(0.20, float(blur_A) / max(px_A, 1e-12))
-        image = gaussian_filter(image, sigma=sigma_px, mode="constant")
+    if atom_kernel == "Point Gaussian":
+        image, _, _ = np.histogram2d(xy[:, 1], xy[:, 0], bins=(edges_y, edges_x), weights=weights)
+        if blur_A > 0:
+            px_A = side / npx
+            sigma_px = max(0.20, float(blur_A) / max(px_A, 1e-12))
+            image = gaussian_filter(image, sigma=sigma_px, mode="constant")
+    else:
+        image = np.zeros((npx, npx), dtype=float)
+        px_A = side / npx
+        # Render one field per element class with an element-dependent Gaussian width.
+        # This is substantially closer to a molecular occupancy/electron-density visual
+        # than a single point kernel while remaining fast for tens of thousands of atoms.
+        for element in sorted(set(elems.tolist())):
+            mask = elems == element
+            if not np.any(mask):
+                continue
+            layer, _, _ = np.histogram2d(xy[mask, 1], xy[mask, 0], bins=(edges_y, edges_x), weights=weights[mask])
+            vdw = float(ELEMENT_VDW_RADIUS_A.get(element, 1.7))
+            sigma_A = math.sqrt((vdw / 2.355) ** 2 + float(blur_A) ** 2)
+            sigma_px = max(0.20, sigma_A / max(px_A, 1e-12))
+            image += gaussian_filter(layer, sigma=sigma_px, mode="constant")
+
     image -= image.min()
     peak = float(image.max())
     if peak > 0:
         image /= peak
-
     counts = {e: int(np.sum(elems == e)) for e in sorted(set(elems.tolist()))}
+    metadata_mode = f"{mode}; {projection_note}; kernel={atom_kernel}"
     return AtomicProjection(
         image=image,
         points_2d=xy,
@@ -511,11 +632,11 @@ def atomic_density_projection(
         y_label="Transverse Y (Å)",
         width_A=side,
         height_A=side,
-        mode=mode,
+        mode=metadata_mode,
     )
 
 
-def atomic_edge_target(image: np.ndarray, blur_sigma_px: float = 1.0) -> np.ndarray:
+def atomic_edge_target(image: np.ndarray, blur_sigma_px: float = 1.0, sharpen_power: float = 2.5) -> np.ndarray:
     img = np.asarray(image, dtype=float)
     if img.ndim != 2:
         raise ValueError("image must be 2-D")
@@ -528,6 +649,12 @@ def atomic_edge_target(image: np.ndarray, blur_sigma_px: float = 1.0) -> np.ndar
     gy, gx = np.gradient(work)
     edges = np.hypot(gx, gy)
     edges -= edges.min()
+    if edges.max() > 0:
+        edges /= edges.max()
+    # Nonlinear sharpening concentrates the target on the strongest ridges/edges,
+    # producing a line field more comparable to powder accumulation on nodal curves.
+    power = max(0.5, float(sharpen_power))
+    edges = np.power(edges, power)
     if edges.max() > 0:
         edges /= edges.max()
     return edges

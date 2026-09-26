@@ -1,49 +1,32 @@
-DNA CYMATICS — MODEL LIMITATIONS
+MODEL LIMITATIONS
+=================
 
-1. Sequence-to-coordinate model
-   The built-in generator is a pure-Python parametric heavy-atom geometry model.
-   It is deterministic and explicit, but it is not a force-field calculation,
-   molecular-dynamics simulation, quantum calculation, or experimentally refined
-   structure.
+1. The internal heavy-atom builder is a deterministic geometric model, not a force-field, quantum-mechanical, crystallographic, cryo-EM, or experimental structure.
 
-2. Heavy atoms only
-   Hydrogen coordinates are omitted by design. They are more sensitive to
-   protonation, tautomer and local environment than the heavy-atom scaffold.
+2. Mature mRNA/cDNA is not equivalent to genomic DNA. Using a cDNA sequence in the double-stranded DNA builder is a deliberate modeling construct.
 
-3. Sequence dependence
-   B-DNA receives sequence-dependent local twist/rise and limited transverse
-   shift/slide modulation. A/C/Z conformations use idealized family parameters.
+3. A literal projection of an entire gene-length DNA molecule is elongated. Compact artwork requires a derived cross-sectional representation such as a one-turn, helical-phase, or rolling-turn projection.
 
-4. A/B/C/Z labels
-   A-DNA, B-DNA and Z-DNA are useful structural families. C-DNA is included as
-   an exploratory geometric preset, not as a claim of a unique sequence-derived
-   C-DNA conformation. The internal Z model is idealized and should not be treated
-   as equivalent to a solved Z-DNA structure.
+4. The rolling-turn projection is sequence-wide but is not a literal photograph of the entire gene physically folded into a single turn.
 
-5. Uploaded structures
-   PDB/mmCIF input is preferred when an experimental or externally validated
-   coordinate set is available. The application uses those coordinates directly
-   apart from deterministic axis alignment for visualization.
+5. Atomic-number weighting is an electron-count proxy, not a calculated electron-density map.
 
-6. Projection
-   A side projection of a long DNA molecule is expected to be line-like. The
-   top-down, one-turn and phase-folded views are separate representations.
-   Phase folding is a mathematical registration transform, not a camera image.
+6. Gaussian atomic footprints approximate occupancy/visual density. They are not molecular scattering form factors.
 
-7. Cymatics target
-   Atomic density is not a plate displacement field. The optional edge/nodal
-   transform creates a comparison geometry for resonator matching.
+7. The circular membrane and clamped circular plate modes are ideal analytical resonators. Real plates differ because of mounting, finite actuator area, damping, imperfections, tension, material anisotropy, and boundary conditions.
 
-8. Frequency interpretation
-   A computed frequency is a property of the selected resonator model. It is not
-   an intrinsic DNA frequency.
+8. The inverse fit is performed in a restricted mode basis. An arbitrary 2-D image generally cannot be reproduced exactly by a small number of resonant modes.
 
-9. Real plate behavior
-   Physical Chladni patterns depend on geometry, thickness, stiffness/tension,
-   mounting, boundary conditions, damping and actuator coupling. The ideal circular
-   membrane model is therefore a hypothesis generator.
+9. The default displacement-power inverse is a first-order linear/time-averaged observable model.
 
-10. Validation
-    Image similarity is useful for pattern comparison but does not establish
-    causality, uniqueness or biological significance. Controlled experiments and
-    repeated measurements are required.
+10. The Nodal / sand model is a visualization proxy. Real powder/sand motion is nonlinear and depends on particle size, friction, adhesion, air drag, plate acceleration, and other effects.
+
+11. A multi-tone drive does not automatically create one static Chladni pattern. Distinct frequencies can generate multiple spatial modes and time-varying interference; the primary WAV is therefore an inverse-model excitation, not a guarantee of one static image.
+
+12. The actuator coupling factor is a controllability proxy, not a measured mechanical transfer function.
+
+13. Calibration CSV data currently shifts frequencies to measured resonances and may apply response weighting. It does not identify phase, Q, damping, or complete complex frequency response.
+
+14. Experimental image registration can improve numerical agreement but does not establish that the DNA geometry caused the observed pattern.
+
+15. Strong validation requires a calibrated resonator, controlled boundary conditions, recorded drive parameters, repeated measurements, and comparison against measured mode shapes.
